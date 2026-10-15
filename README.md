@@ -9,16 +9,45 @@ Built with **React Native + Expo (SDK 57)** and **TypeScript**, following the
 
 ## How this project is built
 
-The app is built **one step at a time**. Every step has two parts, both recorded in this README:
+The app is built in **steps**, and every step is split into **small tasks**. Each task goes through
+the same loop, and the next task starts only after the current one is reviewed and tested:
 
-1. **Learn**: the new topic the step depends on, explained before any code.
-2. **Build**: what was built with it, and which files changed.
+1. **Learn**: the new topic the task needs, explained before any code.
+2. **Build**: a small change, only what the task needs.
+3. **Review**: walk through the code together, line by line if needed.
+4. **Test**: run it and confirm it works.
+5. **Move on**: mark the task ✅ and start the next one.
+
+## Task tracker
+
+### Step 1: Project setup and design tokens
+
+| Task | What | Status |
+|---|---|---|
+| 1.1 | Create the Expo + TypeScript project | ✅ Built · 🔍 review pending |
+| 1.2 | Design tokens: colours, radii, spacing, type (`src/theme/tokens.ts`) | ✅ Built · 🔍 review pending |
+| 1.3 | Light / dark theme with React Context (`src/theme/ThemeProvider.tsx`) | ✅ Built · 🔍 review pending |
+| 1.4 | Load Geist fonts (`src/theme/fonts.ts`) | ✅ Built · 🔍 review pending |
+| 1.5 | Token preview screen to test it all (`App.tsx`) | ✅ Built · 🔍 review pending |
+
+### Step 2: Snippet database
+
+| Task | What | Status |
+|---|---|---|
+| 2.1 | Install `expo-sqlite` and open the database | ⬜ |
+| 2.2 | Create the `snippets` table | ⬜ |
+| 2.3 | `Snippet` type + read all snippets | ⬜ |
+| 2.4 | Add a snippet | ⬜ |
+| 2.5 | Edit and delete a snippet | ⬜ |
+| 2.6 | Pin / unpin a snippet | ⬜ |
+
+Steps 3–8 are broken into tasks when we reach them.
 
 ## Roadmap
 
 | Step | Learn | Build | Status |
 |---|---|---|---|
-| 1 | Expo, React Native core components, styling, theming with Context, custom fonts | Project setup + design tokens + light/dark theme | ✅ Done |
+| 1 | Expo, React Native core components, styling, theming with Context, custom fonts | Project setup + design tokens + light/dark theme | 🔍 Built, review pending |
 | 2 | SQLite on a device (`expo-sqlite`), SQL basics, the repository pattern | Snippet database: create, read, update, delete, pin | ⏳ Next |
 | 3 | File-based navigation with Expo Router | Screens and routes: Home, Add/Edit, Settings | ⬜ |
 | 4 | Lists (`SectionList`), search filtering, clipboard | Home screen: search, Pinned / All, tap to copy, empty states | ⬜ |
