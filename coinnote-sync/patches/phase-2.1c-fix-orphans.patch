@@ -1,0 +1,278 @@
+diff --git a/data/database/uuidMigration/copyData.ts b/data/database/uuidMigration/copyData.ts
+index d2a7e36..20f060e 100644
+--- a/data/database/uuidMigration/copyData.ts
++++ b/data/database/uuidMigration/copyData.ts
+@@ -9,6 +9,9 @@ import { NEW_TABLES_SQL } from "./newSchema";
+  * - money -> whole paise
+  * - one INSERT op per category / budget / non-draft bill in sync_outbox, so the
+  *   first sync uploads everything (P2-D1). ATT drafts never go to the outbox.
++ * - orphan rows (bill / budget whose category was already deleted, old delete bug)
++ *   are kept and moved to an "Uncategorized" category of that user (one per type,
++ *   created only when needed, an existing one is reused).
+  * Old tables are only read. Must run inside the migration transaction.
+  */
+ 
+@@ -47,6 +50,87 @@ function mapLink(map: Map<number, string>, oldId: number | null): string | null
+   return newId;
+ }
+ 
++const UNCATEGORIZED_NAME = "Uncategorized";
++
++// true when the row points to a category id that no longer exists (0 / null = no category, not an orphan)
++function isOrphanLink(map: Map<number, string>, oldId: number | null): boolean {
++  if (oldId === null || oldId === undefined || oldId === 0) {
++    return false;
++  }
++  return !map.has(oldId);
++}
++
++// category type for the "Uncategorized" of an orphan bill: income -> I, expense / transfer -> E
++function uncategorizedTypeForBill(typeofbill: string): string {
++  return typeofbill === "I" ? "I" : "E";
++}
++
++/**
++ * Creates (or reuses) one "Uncategorized" category per user and type that has orphan rows.
++ * Must run after copyCategories (so a reused one is already in category_new) and before
++ * budgets / bills (so their outbox ops come after the category op).
++ *
++ * @returns key "userId:type" -> category id
++ */
++function prepareUncategorized(db: MigrationDb, maps: IdMaps, newId: () => string, now: string): Map<string, string> {
++  const result = new Map<string, string>();
++
++  // which user + type pairs need one
++  const neededKeys = new Set<string>();
++  const needed: { userId: number; type: string }[] = [];
++  const addNeeded = (userId: number, type: string) => {
++    const key = userId + ":" + type;
++    if (!neededKeys.has(key)) {
++      neededKeys.add(key);
++      needed.push({ userId: userId, type: type });
++    }
++  };
++
++  const bills = db.all<any>(`SELECT userid, toaccid, typeofbill FROM bill ORDER BY id`);
++  for (const bill of bills) {
++    if (isOrphanLink(maps.category, bill.toaccid)) {
++      addNeeded(bill.userid, uncategorizedTypeForBill(bill.typeofbill));
++    }
++  }
++  const budgets = db.all<any>(`SELECT userid, categoryid FROM budget ORDER BY id`);
++  for (const budget of budgets) {
++    if (isOrphanLink(maps.category, budget.categoryid)) {
++      addNeeded(budget.userid, "E");
++    }
++  }
++
++  for (const item of needed) {
++    const key = item.userId + ":" + item.type;
++
++    // reuse an existing "Uncategorized" of this user and type
++    const existing = db.all<{ id: number }>(
++      `SELECT id FROM category WHERE name = ? AND userid = ? AND typeofcategory = ? ORDER BY id LIMIT 1`,
++      [UNCATEGORIZED_NAME, item.userId, item.type],
++    );
++    if (existing.length > 0) {
++      result.set(key, maps.category.get(existing[0].id) as string);
++      continue;
++    }
++
++    const id = newId();
++    db.run(
++      `INSERT INTO category_new (id, user_id, name, type, parent_id, root_category_id, icon, auto_repeat_budget)
++       VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0)`,
++      [id, item.userId, UNCATEGORIZED_NAME, item.type],
++    );
++    addOutboxInsert(db, newId, now, item.userId, "category", id, {
++      id: id,
++      name: UNCATEGORIZED_NAME,
++      type: item.type,
++      parent_id: null,
++      icon: null,
++    });
++    result.set(key, id);
++  }
++
++  return result;
++}
++
+ // column names of a table on this phone (some phones miss ATT / legacy columns)
+ function columnsOf(db: MigrationDb, table: string): string[] {
+   const rows = db.all<{ name: string }>(`PRAGMA table_info(${table})`);
+@@ -106,11 +190,14 @@ function copyCategories(db: MigrationDb, maps: IdMaps, newId: () => string, now:
+   }
+ }
+ 
+-function copyBudgets(db: MigrationDb, maps: IdMaps, newId: () => string, now: string): void {
++function copyBudgets(db: MigrationDb, maps: IdMaps, uncategorized: Map<string, string>, newId: () => string, now: string): void {
+   const rows = db.all<any>(`SELECT * FROM budget ORDER BY id`);
+   for (const row of rows) {
+     const id = maps.budget.get(row.id) as string;
+-    const categoryId = mapLink(maps.category, row.categoryid);
++    let categoryId = mapLink(maps.category, row.categoryid);
++    if (isOrphanLink(maps.category, row.categoryid)) {
++      categoryId = uncategorized.get(row.userid + ":E") as string;
++    }
+     const limitPaise = toPaise(row.initialbudget);
+ 
+     db.run(
+@@ -129,13 +216,16 @@ function copyBudgets(db: MigrationDb, maps: IdMaps, newId: () => string, now: st
+   }
+ }
+ 
+-function copyBills(db: MigrationDb, maps: IdMaps, newId: () => string, now: string): void {
++function copyBills(db: MigrationDb, maps: IdMaps, uncategorized: Map<string, string>, newId: () => string, now: string): void {
+   const hasAtt = columnsOf(db, "bill").includes("billstatus");
+ 
+   const rows = db.all<any>(`SELECT * FROM bill ORDER BY id`);
+   for (const row of rows) {
+     const id = maps.bill.get(row.id) as string;
+-    const categoryId = mapLink(maps.category, row.toaccid);
++    let categoryId = mapLink(maps.category, row.toaccid);
++    if (isOrphanLink(maps.category, row.toaccid)) {
++      categoryId = uncategorized.get(row.userid + ":" + uncategorizedTypeForBill(row.typeofbill)) as string;
++    }
+     const amountPaise = toPaise(row.amount);
+     const status = hasAtt ? row.billstatus : "C";
+     const sender = hasAtt ? row.smssender : null;
+@@ -190,8 +280,9 @@ export function copyAllData(db: MigrationDb, newId: () => string, now: string):
+   };
+ 
+   copyCategories(db, maps, newId, now);
+-  copyBudgets(db, maps, newId, now);
+-  copyBills(db, maps, newId, now);
++  const uncategorized = prepareUncategorized(db, maps, newId, now);
++  copyBudgets(db, maps, uncategorized, newId, now);
++  copyBills(db, maps, uncategorized, newId, now);
+   copyDocUrls(db, maps);
+ 
+   return { idMaps: maps };
+diff --git a/tests/uuidMigration/copyData.test.ts b/tests/uuidMigration/copyData.test.ts
+index 2cbaf91..8692f57 100644
+--- a/tests/uuidMigration/copyData.test.ts
++++ b/tests/uuidMigration/copyData.test.ts
+@@ -82,10 +82,11 @@ describe("bill_new", () => {
+     expect(draft.deduphash).toBe("hash1");
+   });
+ 
+-  it("bill pointing to a category that no longer exists gets category NULL", () => {
++  it("bill pointing to a category that no longer exists moves to 'Uncategorized'", () => {
+     const { db } = migrate();
+     const lost = db.all<any>("SELECT * FROM bill_new WHERE title = 'Lost category'")[0];
+-    expect(lost.category_id).toBeNull();
++    const uncategorized = db.all<any>("SELECT * FROM category_new WHERE name = 'Uncategorized'")[0];
++    expect(lost.category_id).toBe(uncategorized.id);
+   });
+ 
+   it("phone without ATT columns: status 'C', no sender / hash", () => {
+@@ -131,7 +132,7 @@ describe("sync_outbox", () => {
+   it("one INSERT per category, budget and non-draft bill, in that order", () => {
+     const { db } = migrate();
+     const ops = db.all<any>("SELECT entity, op FROM sync_outbox ORDER BY seq");
+-    expect(ops.map((o) => o.entity)).toEqual(["category", "category", "category", "budget", "bill", "bill", "bill"]);
++    expect(ops.map((o) => o.entity)).toEqual(["category", "category", "category", "category", "budget", "bill", "bill", "bill"]);
+     expect(ops.every((o) => o.op === "INSERT")).toBe(true);
+   });
+ 
+@@ -168,3 +169,100 @@ describe("sync_outbox", () => {
+     expect(db.all<any>("SELECT * FROM sync_state").length).toBe(0);
+   });
+ });
++
++describe("orphan rows (category already deleted) -> 'Uncategorized'", () => {
++  function migrateWith(extraSql: string) {
++    const raw = createOldDb();
++    raw.exec(`
++      INSERT INTO category (id, name, userid, parentid, typeofcategory) VALUES (1, 'Food', 5, NULL, 'E');
++      INSERT INTO category (id, name, userid, parentid, typeofcategory) VALUES (2, 'Salary', 6, NULL, 'I');
++      INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (10, 100, 1, 0, 5, '2026-10-01 10:00:00', 'E', 'ok bill');
++      INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (11, 5, 2, 0, 6, '2026-10-01 10:00:00', 'I', 'user 6 ok');
++    `);
++    raw.exec(extraSql);
++    const db = wrap(raw);
++    createNewTables(db);
++    const result = copyAllData(db, fakeIdGenerator(), NOW);
++    return { raw, db, result };
++  }
++
++  function uncategorized(db: any, userId: number, type: string) {
++    return db.all("SELECT * FROM category_new WHERE name = 'Uncategorized' AND user_id = ? AND type = ?", [userId, type]);
++  }
++
++  it("orphan expense bill -> 'Uncategorized' (E) of that user", () => {
++    const { db } = migrateWith(`INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (20, 30, 99, 0, 5, '2026-10-02 10:00:00', 'E', 'orphan E');`);
++    const cat = uncategorized(db, 5, "E");
++    expect(cat.length).toBe(1);
++    expect(db.all<any>("SELECT category_id FROM bill_new WHERE title = 'orphan E'")[0].category_id).toBe(cat[0].id);
++    expect(cat[0].parent_id).toBeNull();
++  });
++
++  it("orphan income bill -> 'Uncategorized' (I)", () => {
++    const { db } = migrateWith(`INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (20, 30, 99, 0, 5, '2026-10-02 10:00:00', 'I', 'orphan I');`);
++    const cat = uncategorized(db, 5, "I");
++    expect(cat.length).toBe(1);
++    expect(db.all<any>("SELECT category_id FROM bill_new WHERE title = 'orphan I'")[0].category_id).toBe(cat[0].id);
++  });
++
++  it("orphan transfer bill -> 'Uncategorized' (E)", () => {
++    const { db } = migrateWith(`INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (20, 30, 99, 0, 5, '2026-10-02 10:00:00', 'T', 'orphan T');`);
++    expect(uncategorized(db, 5, "E").length).toBe(1);
++  });
++
++  it("several orphans of same user and type share one 'Uncategorized'", () => {
++    const { db } = migrateWith(`
++      INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (20, 30, 99, 0, 5, '2026-10-02 10:00:00', 'E', 'o1');
++      INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (21, 40, 98, 0, 5, '2026-10-02 10:00:00', 'E', 'o2');
++    `);
++    expect(uncategorized(db, 5, "E").length).toBe(1);
++  });
++
++  it("existing 'Uncategorized' of the user is reused, no duplicate", () => {
++    const { db, result } = migrateWith(`
++      INSERT INTO category (id, name, userid, parentid, typeofcategory) VALUES (8, 'Uncategorized', 5, NULL, 'E');
++      INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (20, 30, 99, 0, 5, '2026-10-02 10:00:00', 'E', 'orphan E');
++    `);
++    const cat = uncategorized(db, 5, "E");
++    expect(cat.length).toBe(1);
++    expect(cat[0].id).toBe(result.idMaps.category.get(8));
++    expect(db.all<any>("SELECT category_id FROM bill_new WHERE title = 'orphan E'")[0].category_id).toBe(cat[0].id);
++  });
++
++  it("user without orphans gets no 'Uncategorized'", () => {
++    const { db } = migrateWith(`INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (20, 30, 99, 0, 5, '2026-10-02 10:00:00', 'E', 'orphan E');`);
++    expect(db.all<any>("SELECT * FROM category_new WHERE name = 'Uncategorized' AND user_id = 6").length).toBe(0);
++  });
++
++  it("orphan budget is kept and points to 'Uncategorized' (E)", () => {
++    const { db } = migrateWith(`INSERT INTO budget (id, year, month, userid, categoryid, initialbudget, usedamount, type) VALUES (30, 2026, 10, 5, 99, 500, 0, 'M');`);
++    const cat = uncategorized(db, 5, "E");
++    expect(cat.length).toBe(1);
++    const budget = db.all<any>("SELECT * FROM budget_new")[0];
++    expect(budget.category_id).toBe(cat[0].id);
++    expect(budget.limit_paise).toBe(50000);
++  });
++
++  it("new 'Uncategorized' is in the outbox before budgets and bills, bill op uses its id", () => {
++    const { db } = migrateWith(`INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (20, 30, 99, 0, 5, '2026-10-02 10:00:00', 'E', 'orphan E');`);
++    const cat = uncategorized(db, 5, "E")[0];
++    const ops = db.all<any>("SELECT entity, record_id, data FROM sync_outbox ORDER BY seq");
++    const catIndex = ops.findIndex((o) => o.record_id === cat.id);
++    const firstNonCategory = ops.findIndex((o) => o.entity !== "category");
++    expect(catIndex).toBeGreaterThanOrEqual(0);
++    expect(catIndex).toBeLessThan(firstNonCategory);
++    expect(JSON.parse(ops[catIndex].data)).toEqual({ id: cat.id, name: "Uncategorized", type: "E", parent_id: null, icon: null });
++    const billId = db.all<any>("SELECT id FROM bill_new WHERE title = 'orphan E'")[0].id;
++    const billOp = ops.find((o) => o.record_id === billId);
++    expect(JSON.parse(billOp.data).category_id).toBe(cat.id);
++  });
++
++  it("no money is lost: total paise = old total x 100", () => {
++    const { db, raw } = migrateWith(`
++      INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (20, 30.25, 99, 0, 5, '2026-10-02 10:00:00', 'E', 'o1');
++    `);
++    const oldTotal = (raw.prepare("SELECT SUM(amount) AS t FROM bill").get() as { t: number }).t;
++    const newTotal = db.all<any>("SELECT SUM(amount_paise) AS t FROM bill_new")[0].t;
++    expect(newTotal).toBe(Math.round(oldTotal * 100));
++  });
++});

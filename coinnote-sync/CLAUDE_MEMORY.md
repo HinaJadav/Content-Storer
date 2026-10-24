@@ -1,6 +1,6 @@
 # CoinNote cloud sync — working memory
 
-**Last updated:** 2026-10-25 · read this first at every session start.
+**Last updated:** 2026-10-25 (2.1c-fix) · read this first at every session start.
 Repos: app `navneetthakor/CNGUI` (cngui, branch `cloud_sync_hj_17102026`), server `HinaJadav/cnnode` (branch `cloud_sync_17102026`), device schema ref `navneetthakor/CNDBUtility`.
 Detail docs: `docs/` next to this file. All delivered patches: `patches/`.
 
@@ -44,7 +44,8 @@ Detail docs: `docs/` next to this file. All delivered patches: `patches/`.
 - ✅ 2.R rework R1–R11, R13, R16 (R14 in 2.3, R15 in 2.4). ✅ 2.0 (server v3 + app versionCode).
 - ✅ cngui test setup (vitest + better-sqlite3 + uuid, `images.d.ts` for .png types).
 - ✅ 2.1c copy step patch delivered (`data/database/uuidMigration/`), **not wired in**.
-- ⏳ **OPEN NOW:** orphan rows (bills/budgets whose category was deleted, old F-A bug). Options A "Uncategorized" per user + delete orphan budgets (recommended) / B delete / C keep local-only. Then **2.1c-fix** → 2.1d (verify + swap + indexes + user_version) → 2.1e (safety copy + skip + expo adapter) → 2.2 … 2.7 → Phase 3 code → Phase 4 code → Phase 6 cleanup.
+- ✅ 2.1c-fix: orphan rows (category already deleted) are **kept**: orphan bills → "Uncategorized" (I for income, E for expense/transfer), orphan budgets → "Uncategorized" (E); one per user+type, created only when needed, existing one reused; synced like other rows. Patch `phase-2.1c-fix-orphans.patch`.
+- ⏳ **NEXT:** 2.1d (verify counts/sums + swap tables + indexes + `PRAGMA user_version = 1`) → 2.1e (safety copy + skip + expo adapter) → 2.2 … 2.7 → Phase 3 code → Phase 4 code → Phase 6 cleanup.
 - Phase 4 open questions Q1–Q4 (`docs/CoinNote_Phase4_Detail.md`). Premium OP-1 (token refresh copies old ispremiumuser) — later.
 - Before first Phase 2 phone test: `eas build:version:set` → 35. Don't release a build with version code ≥ 35 before 2.2/2.3 (app-side defaults).
 
