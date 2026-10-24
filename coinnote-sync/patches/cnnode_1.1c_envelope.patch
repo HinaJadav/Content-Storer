@@ -1,0 +1,88 @@
+diff --git a/src/contract/envelope.ts b/src/contract/envelope.ts
+new file mode 100644
+index 0000000..9124d85
+--- /dev/null
++++ b/src/contract/envelope.ts
+@@ -0,0 +1,82 @@
++import { z } from "zod";
++import { SYNC_REGISTRY, SYNC_ENTITIES, ColumnDef } from "./registry.js";
++
++/**
++ * Sync Envelope
++ * -------------
++ * Request validation for /sync/push and /sync/pull, built ONCE from the registry.
++ * .strict() rejects unknown keys, so user_id or server-only columns fail validation.
++ * Max ops per push is NOT checked here: it comes from config at runtime
++ * (syncLimitsService), so the controller checks ops.length.
++ */
++
++// "YYYY-MM-DD HH:MM:SS" (phone local time, no timezone)
++const LOCAL_DATE_TIME = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
++
++// zod uuid + lowercase only (SQLite compares text exactly)
++const uuidSchema = z.uuid().refine((v) => v === v.toLowerCase(), "uuid must be lowercase");
++
++// zod schema for one column, from its registry definition
++function columnSchema(def: ColumnDef): z.ZodType {
++    let schema: z.ZodType;
++
++    if (def.kind === "uuid") {
++        schema = uuidSchema;
++    } else if (def.kind === "text") {
++        schema = z.string().max(def.max ?? 255);
++    } else if (def.kind === "enum") {
++        schema = z.enum(def.values as [string, ...string[]]);
++    } else if (def.kind === "localDateTime") {
++        schema = z.string().regex(LOCAL_DATE_TIME, "expected YYYY-MM-DD HH:MM:SS");
++    } else {
++        // int and money: whole numbers within limits
++        schema = z.number().int().min(def.min ?? 0).max(def.max ?? Number.MAX_SAFE_INTEGER);
++    }
++
++    if (def.nullable) {
++        schema = schema.nullable();
++    }
++    return schema;
++}
++
++// one push operation for one entity
++function pushOpSchema(entity: string) {
++    const shape: Record<string, z.ZodType> = {};
++    for (const [name, def] of Object.entries(SYNC_REGISTRY[entity].columns)) {
++        shape[name] = columnSchema(def);
++    }
++
++    return z.object({
++        op_id: uuidSchema,                         // retry key: same op_id = same operation
++        entity: z.literal(entity),
++        id: uuidSchema,
++        kind: z.enum(["upsert", "delete"]),
++        base_seq: z.number().int().min(0).nullable(), // server seq the phone last saw, null = new row
++        data: z.object(shape).strict().optional(),     // full row for upsert, absent for delete
++    }).strict().superRefine((op, ctx) => {
++        if (op.kind === "upsert" && !op.data) {
++            ctx.addIssue({ code: "custom", message: "upsert needs data" });
++        }
++        if (op.kind === "delete" && op.data) {
++            ctx.addIssue({ code: "custom", message: "delete must not have data" });
++        }
++        if (op.data && op.data.id !== op.id) {
++            ctx.addIssue({ code: "custom", message: "data.id must match id" });
++        }
++    });
++}
++
++const opSchemas = SYNC_ENTITIES.map((entity) => pushOpSchema(entity));
++
++// POST /sync/push body
++export const pushRequestSchema = z.object({
++    ops: z.array(z.union(opSchemas as unknown as [z.ZodType, z.ZodType, ...z.ZodType[]])).min(1),
++}).strict();
++
++// POST /sync/pull body: cursor = last seq the phone has (0 on a fresh phone)
++export const pullRequestSchema = z.object({
++    cursor: z.number().int().min(0),
++}).strict();
++
++export type PushRequest = z.infer<typeof pushRequestSchema>;
++export type PullRequest = z.infer<typeof pullRequestSchema>;

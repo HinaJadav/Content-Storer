@@ -1,0 +1,587 @@
+diff --git a/data/database/uuidMigration/copyData.ts b/data/database/uuidMigration/copyData.ts
+new file mode 100644
+index 0000000..d2a7e36
+--- /dev/null
++++ b/data/database/uuidMigration/copyData.ts
+@@ -0,0 +1,198 @@
++import { MigrationDb } from "./migrationDb";
++import { NEW_TABLES_SQL } from "./newSchema";
++
++/**
++ * UUID migration — copy step (2.1c).
++ * Reads the OLD tables (integer ids, rupee amounts), writes the *_new tables:
++ * - every row gets a new id, given in old-id order (keeps sort order)
++ * - links (parentid, rootcategoryid, toaccid, categoryid, billid) point to the new ids
++ * - money -> whole paise
++ * - one INSERT op per category / budget / non-draft bill in sync_outbox, so the
++ *   first sync uploads everything (P2-D1). ATT drafts never go to the outbox.
++ * Old tables are only read. Must run inside the migration transaction.
++ */
++
++export interface IdMaps {
++  category: Map<number, string>;
++  budget: Map<number, string>;
++  bill: Map<number, string>;
++}
++
++export interface CopyResult {
++  idMaps: IdMaps;
++}
++
++// creates category_new, bill_new, budget_new, bill_docurl_new, sync_outbox, sync_state
++export function createNewTables(db: MigrationDb): void {
++  db.exec(NEW_TABLES_SQL);
++}
++
++// rupees (may hold decimals) -> whole paise
++function toPaise(amount: number | null): number {
++  if (amount === null || amount === undefined) {
++    return 0;
++  }
++  return Math.round(Number(amount) * 100);
++}
++
++// old link id -> new id; 0, null or a row that no longer exists -> null
++function mapLink(map: Map<number, string>, oldId: number | null): string | null {
++  if (oldId === null || oldId === undefined || oldId === 0) {
++    return null;
++  }
++  const newId = map.get(oldId);
++  if (newId === undefined) {
++    return null;
++  }
++  return newId;
++}
++
++// column names of a table on this phone (some phones miss ATT / legacy columns)
++function columnsOf(db: MigrationDb, table: string): string[] {
++  const rows = db.all<{ name: string }>(`PRAGMA table_info(${table})`);
++  return rows.map((row) => row.name);
++}
++
++// new id for every old row, in old-id order
++function buildIdMap(db: MigrationDb, table: string, newId: () => string): Map<number, string> {
++  const map = new Map<number, string>();
++  const rows = db.all<{ id: number }>(`SELECT id FROM ${table} ORDER BY id`);
++  for (const row of rows) {
++    map.set(row.id, newId());
++  }
++  return map;
++}
++
++function addOutboxInsert(
++  db: MigrationDb,
++  newId: () => string,
++  now: string,
++  userId: number,
++  entity: string,
++  recordId: string,
++  data: Record<string, unknown>,
++): void {
++  db.run(
++    `INSERT INTO sync_outbox (op_id, user_id, entity, record_id, op, data, sent, created_at)
++     VALUES (?, ?, ?, ?, 'INSERT', ?, 0, ?)`,
++    [newId(), userId, entity, recordId, JSON.stringify(data), now],
++  );
++}
++
++function copyCategories(db: MigrationDb, maps: IdMaps, newId: () => string, now: string): void {
++  const columns = columnsOf(db, "category");
++  const hasRoot = columns.includes("rootcategoryid");
++  const hasAutoRepeat = columns.includes("autorepeatbudget");
++
++  const rows = db.all<any>(`SELECT * FROM category ORDER BY id`);
++  for (const row of rows) {
++    const id = maps.category.get(row.id) as string;
++    const parentId = mapLink(maps.category, row.parentid);
++    const rootId = hasRoot ? mapLink(maps.category, row.rootcategoryid) : null;
++    const autoRepeat = hasAutoRepeat && row.autorepeatbudget ? 1 : 0;
++
++    db.run(
++      `INSERT INTO category_new (id, user_id, name, type, parent_id, root_category_id, icon, auto_repeat_budget)
++       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
++      [id, row.userid, row.name, row.typeofcategory, parentId, rootId, row.icon, autoRepeat],
++    );
++    addOutboxInsert(db, newId, now, row.userid, "category", id, {
++      id: id,
++      name: row.name,
++      type: row.typeofcategory,
++      parent_id: parentId,
++      icon: row.icon,
++    });
++  }
++}
++
++function copyBudgets(db: MigrationDb, maps: IdMaps, newId: () => string, now: string): void {
++  const rows = db.all<any>(`SELECT * FROM budget ORDER BY id`);
++  for (const row of rows) {
++    const id = maps.budget.get(row.id) as string;
++    const categoryId = mapLink(maps.category, row.categoryid);
++    const limitPaise = toPaise(row.initialbudget);
++
++    db.run(
++      `INSERT INTO budget_new (id, user_id, category_id, year, month, type, limit_paise, used_paise)
++       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
++      [id, row.userid, categoryId, row.year, row.month, row.type, limitPaise, toPaise(row.usedamount)],
++    );
++    addOutboxInsert(db, newId, now, row.userid, "budget", id, {
++      id: id,
++      category_id: categoryId,
++      year: row.year,
++      month: row.month,
++      type: row.type,
++      limit_paise: limitPaise,
++    });
++  }
++}
++
++function copyBills(db: MigrationDb, maps: IdMaps, newId: () => string, now: string): void {
++  const hasAtt = columnsOf(db, "bill").includes("billstatus");
++
++  const rows = db.all<any>(`SELECT * FROM bill ORDER BY id`);
++  for (const row of rows) {
++    const id = maps.bill.get(row.id) as string;
++    const categoryId = mapLink(maps.category, row.toaccid);
++    const amountPaise = toPaise(row.amount);
++    const status = hasAtt ? row.billstatus : "C";
++    const sender = hasAtt ? row.smssender : null;
++    const hash = hasAtt ? row.deduphash : null;
++
++    db.run(
++      `INSERT INTO bill_new (id, user_id, category_id, from_acc_id, amount_paise, type, date, title, description, billstatus, smssender, deduphash)
++       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
++      [id, row.userid, categoryId, row.fromaccid ?? 0, amountPaise, row.typeofbill, row.date, row.title, row.description, status, sender, hash],
++    );
++
++    // SMS drafts stay on the phone until the user confirms them
++    if (status === "D") {
++      continue;
++    }
++    addOutboxInsert(db, newId, now, row.userid, "bill", id, {
++      id: id,
++      category_id: categoryId,
++      amount_paise: amountPaise,
++      type: row.typeofbill,
++      date: row.date,
++      title: row.title,
++      description: row.description,
++    });
++  }
++}
++
++function copyDocUrls(db: MigrationDb, maps: IdMaps): void {
++  const rows = db.all<any>(`SELECT * FROM bill_docurl ORDER BY id`);
++  for (const row of rows) {
++    const billId = mapLink(maps.bill, row.billid);
++    // attachment of a bill that no longer exists: nothing to point to
++    if (billId === null) {
++      continue;
++    }
++    db.run(`INSERT INTO bill_docurl_new (bill_id, url) VALUES (?, ?)`, [billId, row.url]);
++  }
++}
++
++/**
++ * Copies all old rows into the *_new tables and fills sync_outbox.
++ * Order: categories, budgets, bills (parents before children for the first sync).
++ *
++ * @param newId - creates one new id (uuid v7 in the app, predictable ids in tests)
++ * @param now - created_at for outbox rows ("YYYY-MM-DD HH:MM:SS")
++ */
++export function copyAllData(db: MigrationDb, newId: () => string, now: string): CopyResult {
++  const maps: IdMaps = {
++    category: buildIdMap(db, "category", newId),
++    budget: buildIdMap(db, "budget", newId),
++    bill: buildIdMap(db, "bill", newId),
++  };
++
++  copyCategories(db, maps, newId, now);
++  copyBudgets(db, maps, newId, now);
++  copyBills(db, maps, newId, now);
++  copyDocUrls(db, maps);
++
++  return { idMaps: maps };
++}
+diff --git a/data/database/uuidMigration/migrationDb.ts b/data/database/uuidMigration/migrationDb.ts
+new file mode 100644
+index 0000000..84278f3
+--- /dev/null
++++ b/data/database/uuidMigration/migrationDb.ts
+@@ -0,0 +1,13 @@
++/**
++ * Minimal database interface used by the UUID migration.
++ * The app passes the expo-sqlite singleton through a small adapter; tests pass
++ * better-sqlite3. Keeping the migration on this interface lets it be tested in Node.
++ */
++export interface MigrationDb {
++  // run one or more SQL statements, no parameters, no result
++  exec(sql: string): void;
++  // run one statement with parameters (INSERT / UPDATE / DELETE)
++  run(sql: string, params?: unknown[]): void;
++  // run a SELECT and return all rows
++  all<T>(sql: string, params?: unknown[]): T[];
++}
+diff --git a/data/database/uuidMigration/newSchema.ts b/data/database/uuidMigration/newSchema.ts
+new file mode 100644
+index 0000000..4e628b0
+--- /dev/null
++++ b/data/database/uuidMigration/newSchema.ts
+@@ -0,0 +1,66 @@
++/**
++ * Sync-ready local tables (Phase 2, approved shapes 2.1b).
++ * Created next to the old tables with a _new suffix; the swap (2.1d) drops the
++ * old tables and renames these. Indexes are created after the swap.
++ */
++export const NEW_TABLES_SQL = `
++  CREATE TABLE category_new (
++    id                 TEXT    NOT NULL PRIMARY KEY,
++    user_id            INTEGER NOT NULL,
++    name               TEXT    NOT NULL,
++    type               TEXT    NOT NULL,
++    parent_id          TEXT,
++    root_category_id   TEXT,
++    icon               TEXT,
++    auto_repeat_budget INTEGER DEFAULT 0
++  );
++
++  CREATE TABLE bill_new (
++    id           TEXT    NOT NULL PRIMARY KEY,
++    user_id      INTEGER NOT NULL,
++    category_id  TEXT,
++    from_acc_id  INTEGER NOT NULL DEFAULT 0,
++    amount_paise INTEGER NOT NULL,
++    type         TEXT    NOT NULL,
++    date         TEXT    NOT NULL,
++    title        TEXT    NOT NULL,
++    description  TEXT,
++    billstatus   TEXT    NOT NULL DEFAULT 'C',
++    smssender    TEXT,
++    deduphash    TEXT
++  );
++
++  CREATE TABLE budget_new (
++    id          TEXT    NOT NULL PRIMARY KEY,
++    user_id     INTEGER NOT NULL,
++    category_id TEXT    NOT NULL,
++    year        INTEGER NOT NULL,
++    month       INTEGER,
++    type        TEXT    NOT NULL,
++    limit_paise INTEGER NOT NULL,
++    used_paise  INTEGER DEFAULT 0
++  );
++
++  CREATE TABLE bill_docurl_new (
++    id      INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++    bill_id TEXT    NOT NULL,
++    url     TEXT    NOT NULL
++  );
++
++  CREATE TABLE sync_outbox (
++    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
++    op_id      TEXT    NOT NULL UNIQUE,
++    user_id    INTEGER NOT NULL,
++    entity     TEXT    NOT NULL,
++    record_id  TEXT    NOT NULL,
++    op         TEXT    NOT NULL,
++    data       TEXT,
++    sent       INTEGER NOT NULL DEFAULT 0,
++    created_at TEXT    NOT NULL
++  );
++
++  CREATE TABLE sync_state (
++    key   TEXT NOT NULL PRIMARY KEY,
++    value TEXT NOT NULL
++  );
++`;
+diff --git a/tests/uuidMigration/copyData.test.ts b/tests/uuidMigration/copyData.test.ts
+new file mode 100644
+index 0000000..2cbaf91
+--- /dev/null
++++ b/tests/uuidMigration/copyData.test.ts
+@@ -0,0 +1,170 @@
++import { describe, it, expect } from "vitest";
++import { createOldDb, insertSampleData, fakeIdGenerator, wrap } from "./oldDb";
++import { createNewTables, copyAllData } from "@/data/database/uuidMigration/copyData";
++
++/**
++ * 2.1c — new tables + id map + copy rows (links rewritten, money in paise) + outbox rows.
++ * Old tables are only read here; swap happens in 2.1d.
++ */
++
++const NOW = "2026-10-25 10:00:00";
++
++function migrate(options: { withAtt?: boolean; withLegacyCategoryColumns?: boolean } = {}) {
++  const raw = createOldDb(options);
++  if (options.withLegacyCategoryColumns === false) {
++    raw.exec(`
++      INSERT INTO category (id, name, userid, parentid, typeofcategory, icon) VALUES (1, 'Food', 5, NULL, 'E', NULL);
++      INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title) VALUES (42, 10, 1, 0, 5, '2026-10-18 10:30:00', 'E', 'Tea');
++    `);
++  } else {
++    insertSampleData(raw, options.withAtt ?? true);
++  }
++  const db = wrap(raw);
++  createNewTables(db);
++  const result = copyAllData(db, fakeIdGenerator(), NOW);
++  return { raw, db, result };
++}
++
++describe("id map", () => {
++  it("gives every old row a new id, in old-id order per table", () => {
++    const { result } = migrate();
++    expect(result.idMaps.category.get(1)).toBe("id-0001");
++    expect(result.idMaps.category.get(3)).toBe("id-0002");
++    expect(result.idMaps.category.get(7)).toBe("id-0003");
++    expect(result.idMaps.category.size).toBe(3);
++    expect(result.idMaps.budget.size).toBe(1);
++    expect(result.idMaps.bill.size).toBe(4);
++  });
++});
++
++describe("category_new", () => {
++  it("copies rows with new ids and rewritten parent / root links", () => {
++    const { db, result } = migrate();
++    const tea = db.all<any>("SELECT * FROM category_new WHERE name = 'Tea'")[0];
++    expect(tea.id).toBe(result.idMaps.category.get(7));
++    expect(tea.parent_id).toBe(result.idMaps.category.get(1));
++    expect(tea.root_category_id).toBe(result.idMaps.category.get(1));
++    expect(tea.user_id).toBe(5);
++    expect(tea.type).toBe("E");
++    expect(tea.auto_repeat_budget).toBe(0);
++    const food = db.all<any>("SELECT * FROM category_new WHERE name = 'Food'")[0];
++    expect(food.parent_id).toBeNull();
++    expect(food.icon).toBe("food.png");
++    expect(food.auto_repeat_budget).toBe(1);
++  });
++
++  it("works when legacy category columns are missing on the phone", () => {
++    const { db } = migrate({ withLegacyCategoryColumns: false });
++    const food = db.all<any>("SELECT * FROM category_new")[0];
++    expect(food.root_category_id).toBeNull();
++    expect(food.auto_repeat_budget).toBe(0);
++  });
++});
++
++describe("bill_new", () => {
++  it("money becomes paise and category link is rewritten", () => {
++    const { db, result } = migrate();
++    const tea = db.all<any>("SELECT * FROM bill_new WHERE title = 'Tea'")[0];
++    expect(tea.id).toBe(result.idMaps.bill.get(42));
++    expect(tea.amount_paise).toBe(45050);
++    expect(tea.category_id).toBe(result.idMaps.category.get(7));
++    expect(tea.type).toBe("E");
++    expect(tea.date).toBe("2026-10-18 10:30:00");
++    expect(tea.billstatus).toBe("C");
++  });
++
++  it("ATT draft keeps status / sender / hash, category 0 becomes NULL", () => {
++    const { db } = migrate();
++    const draft = db.all<any>("SELECT * FROM bill_new WHERE title = 'SMS draft'")[0];
++    expect(draft.category_id).toBeNull();
++    expect(draft.billstatus).toBe("D");
++    expect(draft.smssender).toBe("VK-HDFCBK");
++    expect(draft.deduphash).toBe("hash1");
++  });
++
++  it("bill pointing to a category that no longer exists gets category NULL", () => {
++    const { db } = migrate();
++    const lost = db.all<any>("SELECT * FROM bill_new WHERE title = 'Lost category'")[0];
++    expect(lost.category_id).toBeNull();
++  });
++
++  it("phone without ATT columns: status 'C', no sender / hash", () => {
++    const { db } = migrate({ withAtt: false });
++    const rows = db.all<any>("SELECT billstatus, smssender, deduphash FROM bill_new");
++    expect(rows.length).toBe(3);
++    for (const row of rows) {
++      expect(row.billstatus).toBe("C");
++      expect(row.smssender).toBeNull();
++      expect(row.deduphash).toBeNull();
++    }
++  });
++});
++
++describe("budget_new and bill_docurl_new", () => {
++  it("budget money in paise, category link rewritten", () => {
++    const { db, result } = migrate();
++    const budget = db.all<any>("SELECT * FROM budget_new")[0];
++    expect(budget.id).toBe(result.idMaps.budget.get(5));
++    expect(budget.category_id).toBe(result.idMaps.category.get(1));
++    expect(budget.limit_paise).toBe(100000);
++    expect(budget.used_paise).toBe(20050);
++    expect(budget.month).toBe(10);
++  });
++
++  it("attachment follows its bill's new id", () => {
++    const { db, result } = migrate();
++    const doc = db.all<any>("SELECT * FROM bill_docurl_new")[0];
++    expect(doc.bill_id).toBe(result.idMaps.bill.get(42));
++    expect(doc.url).toBe("file://receipt.jpg");
++  });
++});
++
++describe("old tables", () => {
++  it("are not changed", () => {
++    const { db } = migrate();
++    expect(db.all<any>("SELECT COUNT(*) AS n FROM bill")[0].n).toBe(4);
++    expect(db.all<any>("SELECT amount FROM bill WHERE id = 42")[0].amount).toBe(450.5);
++  });
++});
++
++describe("sync_outbox", () => {
++  it("one INSERT per category, budget and non-draft bill, in that order", () => {
++    const { db } = migrate();
++    const ops = db.all<any>("SELECT entity, op FROM sync_outbox ORDER BY seq");
++    expect(ops.map((o) => o.entity)).toEqual(["category", "category", "category", "budget", "bill", "bill", "bill"]);
++    expect(ops.every((o) => o.op === "INSERT")).toBe(true);
++  });
++
++  it("drafts are not in the outbox", () => {
++    const { db, result } = migrate();
++    const draftId = result.idMaps.bill.get(43);
++    expect(db.all<any>("SELECT * FROM sync_outbox WHERE record_id = ?", [draftId]).length).toBe(0);
++  });
++
++  it("data holds only wire columns, user_id is the row's user, op_id unique", () => {
++    const { db, result } = migrate();
++    const teaId = result.idMaps.bill.get(42);
++    const op = db.all<any>("SELECT * FROM sync_outbox WHERE record_id = ?", [teaId])[0];
++    expect(JSON.parse(op.data)).toEqual({
++      id: teaId,
++      category_id: result.idMaps.category.get(7),
++      amount_paise: 45050,
++      type: "E",
++      date: "2026-10-18 10:30:00",
++      title: "Tea",
++      description: null,
++    });
++    expect(op.user_id).toBe(5);
++    expect(op.sent).toBe(0);
++    expect(op.created_at).toBe(NOW);
++    const salary = db.all<any>("SELECT user_id FROM sync_outbox WHERE record_id = ?", [result.idMaps.category.get(3)])[0];
++    expect(salary.user_id).toBe(6);
++    const opIds = db.all<any>("SELECT op_id FROM sync_outbox").map((o) => o.op_id);
++    expect(new Set(opIds).size).toBe(opIds.length);
++  });
++
++  it("sync_state exists and is empty", () => {
++    const { db } = migrate();
++    expect(db.all<any>("SELECT * FROM sync_state").length).toBe(0);
++  });
++});
+diff --git a/tests/uuidMigration/oldDb.ts b/tests/uuidMigration/oldDb.ts
+new file mode 100644
+index 0000000..c272d3e
+--- /dev/null
++++ b/tests/uuidMigration/oldDb.ts
+@@ -0,0 +1,110 @@
++import Database from "better-sqlite3";
++import { MigrationDb } from "@/data/database/uuidMigration/migrationDb";
++
++/**
++ * Test helpers: an OLD-shape phone database (integer ids, rupee amounts) in memory,
++ * wrapped in the same MigrationDb interface the app uses.
++ */
++
++export function wrap(db: Database.Database): MigrationDb {
++  return {
++    exec(sql: string) {
++      db.exec(sql);
++    },
++    run(sql: string, params: unknown[] = []) {
++      db.prepare(sql).run(...(params as never[]));
++    },
++    all<T>(sql: string, params: unknown[] = []): T[] {
++      return db.prepare(sql).all(...(params as never[])) as T[];
++    },
++  };
++}
++
++// old schema as created by the server migrations (+ ATT columns when withAtt)
++export function createOldDb(options: { withAtt?: boolean; withLegacyCategoryColumns?: boolean } = {}) {
++  const withAtt = options.withAtt ?? true;
++  const withLegacy = options.withLegacyCategoryColumns ?? true;
++  const db = new Database(":memory:");
++
++  db.exec(`
++    CREATE TABLE "category" (
++      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++      "name" TEXT NOT NULL,
++      "userid" INTEGER NOT NULL,
++      ${withLegacy ? `"rootcategoryid" INTEGER,` : ""}
++      "parentid" INTEGER,
++      "typeofcategory" TEXT NOT NULL,
++      "icon" TEXT
++      ${withLegacy ? `, "autorepeatbudget" BOOLEAN DEFAULT false` : ""}
++    );
++    CREATE TABLE "bill" (
++      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++      "amount" INTEGER NOT NULL,
++      "toaccid" INTEGER NOT NULL,
++      "fromaccid" INTEGER NOT NULL,
++      "userid" INTEGER NOT NULL,
++      "date" DATETIME NOT NULL,
++      "typeofbill" TEXT NOT NULL,
++      "title" TEXT NOT NULL,
++      "description" TEXT
++    );
++    CREATE TABLE "budget" (
++      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++      "year" INTEGER NOT NULL,
++      "month" INTEGER,
++      "userid" INTEGER NOT NULL,
++      "categoryid" INTEGER NOT NULL,
++      "initialbudget" INTEGER NOT NULL,
++      "usedamount" INTEGER DEFAULT 0,
++      "type" TEXT NOT NULL
++    );
++    CREATE TABLE "bill_docurl" (
++      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
++      "billid" INTEGER NOT NULL,
++      "url" TEXT NOT NULL
++    );
++  `);
++
++  if (withAtt) {
++    db.exec(`
++      ALTER TABLE bill ADD COLUMN billstatus TEXT NOT NULL DEFAULT 'C';
++      ALTER TABLE bill ADD COLUMN smssender TEXT;
++      ALTER TABLE bill ADD COLUMN deduphash TEXT;
++    `);
++  }
++  return db;
++}
++
++// sample data: user 5 (main) and user 6 (second account on same phone)
++export function insertSampleData(db: Database.Database, withAtt = true) {
++  db.exec(`
++    INSERT INTO category (id, name, userid, rootcategoryid, parentid, typeofcategory, icon, autorepeatbudget) VALUES
++      (1, 'Food', 5, NULL, NULL, 'E', 'food.png', 1),
++      (7, 'Tea', 5, 1, 1, 'E', NULL, 0),
++      (3, 'Salary', 6, NULL, NULL, 'I', NULL, 0);
++    INSERT INTO budget (id, year, month, userid, categoryid, initialbudget, usedamount, type) VALUES
++      (5, 2026, 10, 5, 1, 1000, 200.5, 'M');
++  `);
++  db.exec(`
++    INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title, description) VALUES
++      (42, 450.5, 7, 0, 5, '2026-10-18 10:30:00', 'E', 'Tea', NULL),
++      (44, 99, 99, 0, 5, '2026-10-18 11:00:00', 'E', 'Lost category', 'x'),
++      (45, 50000, 3, 0, 6, '2026-10-01 09:00:00', 'I', 'Pay', NULL);
++    INSERT INTO bill_docurl (id, billid, url) VALUES (1, 42, 'file://receipt.jpg');
++  `);
++  if (withAtt) {
++    db.exec(`
++      INSERT INTO bill (id, amount, toaccid, fromaccid, userid, date, typeofbill, title, description, billstatus, smssender, deduphash)
++      VALUES (43, 120, 0, 0, 5, '2026-10-18 12:00:00', 'E', 'SMS draft', NULL, 'D', 'VK-HDFCBK', 'hash1');
++    `);
++  }
++}
++
++// predictable ids for tests: id-0001, id-0002, ...
++export function fakeIdGenerator() {
++  let counter = 0;
++  return () => {
++    counter++;
++    return "id-" + String(counter).padStart(4, "0");
++  };
++}

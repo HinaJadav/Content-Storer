@@ -1,0 +1,30 @@
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index 74d2ccd..283ba1e 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -3,11 +3,15 @@ name: Build on PR
+ on:
+   pull_request:
+     branches:
+-      - s-master
++      - master
++      - local
+ 
+ jobs:
+   build:
+     runs-on: ubuntu-latest
++    # fixed port so the health check below knows where the server is
++    env:
++      PORT: 8080
+     steps:
+       - name: Checkout code
+         uses: actions/checkout@v3
+@@ -24,7 +28,7 @@ jobs:
+       - name: Create .env file
+         run: |
+           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
+-          echo "PORT=${{ secrets.PORT }}" >> .env
++          echo "PORT=${PORT}" >> .env
+           echo "UPSTASH_REDIS_REST_URL=${{ secrets.UPSTASH_REDIS_REST_URL }}" >> .env
+           echo "UPSTASH_REDIS_REST_TOKEN=${{ secrets.UPSTASH_REDIS_REST_TOKEN }}" >> .env
+           echo "ACCESS_SECRET=${{ secrets.ACCESS_SECRET }}" >> .env

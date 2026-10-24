@@ -1,0 +1,159 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 493bdaa..7af4626 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -60,8 +60,7 @@ model users {
+   trialstartdate DateTime? @db.Date
+ 
+   // ----- cloud sync -----
+-  current_seq    BigInt     @default(0)      // per-user change counter, last issued seq
+-  cloud_state    String     @default("none") // none | imported | seeded (CHECK in migration)
++  sync_version   BigInt     @default(0)      // per-user change counter, last issued version
+ }
+ 
+ model dbversions {
+@@ -122,7 +121,7 @@ model app_config {
+ // - project rule: NO foreign keys at DB level. category_id / parent_id are
+ //   plain columns; same-user checks are done in code (sync push)
+ // - type columns are text + CHECK (CHECKs hand-written in migration)
+-// - deletes remove the row; change_log keeps a 'delete' note (D3)
++// - deletes remove the row; change_log keeps a 'DELETE' note (D3)
+ // - money in whole paise (D4)
+ // =====================================================================
+ 
+@@ -133,13 +132,10 @@ model category {
+   type           String // I | E
+   parent_id      String?    @db.Uuid
+   icon           String?    @db.VarChar(255)
+-  updated_seq    BigInt
+-  last_op_id     String?    @db.Uuid
+   created_at     DateTime   @default(now()) @db.Timestamptz(3)
+   updated_at     DateTime   @default(now()) @updatedAt @db.Timestamptz(3)
+ 
+   @@id([user_id, id])
+-  @@index([user_id, updated_seq])
+   @@index([user_id, parent_id])
+ }
+ 
+@@ -152,13 +148,10 @@ model bill {
+   date         DateTime @db.Timestamp(0) // phone local wall-clock time, no timezone
+   title        String   @db.VarChar(150)
+   description  String?  @db.VarChar(1000)
+-  updated_seq  BigInt
+-  last_op_id   String?  @db.Uuid
+   created_at   DateTime @default(now()) @db.Timestamptz(3)
+   updated_at   DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+ 
+   @@id([user_id, id])
+-  @@index([user_id, updated_seq])
+   @@index([user_id, category_id])
+ }
+ 
+@@ -170,26 +163,25 @@ model budget {
+   month       Int? // null = yearly budget
+   type        String // M | Y
+   limit_paise BigInt
+-  updated_seq BigInt
+-  last_op_id  String?  @db.Uuid
+   created_at  DateTime @default(now()) @db.Timestamptz(3)
+   updated_at  DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+ 
+   @@id([user_id, id])
+-  @@index([user_id, updated_seq])
+   @@index([user_id, category_id])
+ }
+ 
+-// one row per issued seq; pull reads this to find what changed after a cursor
++// one row per issued version (seq); pull reads this to find what changed after last_synced_version
+ model change_log {
+   user_id       Int
+   seq           BigInt
+   entity        String // category | bill | budget
+   row_id        String   @db.Uuid
+-  op            String // upsert | delete
++  op            String // INSERT | UPDATE | DELETE
++  op_id         String   @db.Uuid // phone's operation id; same op_id = retry, skipped
+   origin_device String?  @db.Uuid // device that made the change (pull skips own changes)
+   created_at    DateTime @default(now()) @db.Timestamptz(3)
+ 
+   @@id([user_id, seq])
++  @@unique([user_id, op_id])
+   @@index([user_id, row_id])
+ }
+diff --git a/tests/schema.test.ts b/tests/schema.test.ts
+new file mode 100644
+index 0000000..ccd6735
+--- /dev/null
++++ b/tests/schema.test.ts
+@@ -0,0 +1,71 @@
++import { describe, it, expect } from "vitest";
++import { Prisma } from "@prisma/client";
++
++/**
++ * 2.R step 1 — schema rework checks.
++ * Reads Prisma's own model info (generated from schema.prisma), no database needed.
++ */
++
++function model(name: string) {
++    const found = Prisma.dmmf.datamodel.models.find((m) => m.name === name);
++    if (!found) {
++        throw new Error(`model ${name} not found`);
++    }
++    return found;
++}
++
++function fieldNames(name: string): string[] {
++    return model(name).fields.map((f) => f.name);
++}
++
++describe("users", () => {
++    it("has sync_version (BigInt, default 0)", () => {
++        const field = model("users").fields.find((f) => f.name === "sync_version");
++        expect(field).toBeDefined();
++        expect(field?.type).toBe("BigInt");
++        expect(field?.isRequired).toBe(true);
++        expect(String(field?.default)).toBe("0"); // Prisma reports BigInt defaults as text
++    });
++
++    it("no longer has current_seq or cloud_state", () => {
++        expect(fieldNames("users")).not.toContain("current_seq");
++        expect(fieldNames("users")).not.toContain("cloud_state");
++    });
++});
++
++describe("category / bill / budget", () => {
++    for (const name of ["category", "bill", "budget"]) {
++        it(`${name}: updated_seq and last_op_id removed`, () => {
++            expect(fieldNames(name)).not.toContain("updated_seq");
++            expect(fieldNames(name)).not.toContain("last_op_id");
++        });
++
++        it(`${name}: primary key is still (user_id, id)`, () => {
++            expect(model(name).primaryKey?.fields).toEqual(["user_id", "id"]);
++        });
++    }
++});
++
++describe("change_log", () => {
++    it("has a required op_id", () => {
++        const field = model("change_log").fields.find((f) => f.name === "op_id");
++        expect(field).toBeDefined();
++        expect(field?.type).toBe("String");
++        expect(field?.isRequired).toBe(true);
++    });
++
++    it("op_id is unique per user", () => {
++        expect(model("change_log").uniqueFields).toContainEqual(["user_id", "op_id"]);
++    });
++
++    it("primary key is still (user_id, seq)", () => {
++        expect(model("change_log").primaryKey?.fields).toEqual(["user_id", "seq"]);
++    });
++
++    it("keeps entity, row_id, op, origin_device, created_at", () => {
++        const names = fieldNames("change_log");
++        for (const col of ["entity", "row_id", "op", "origin_device", "created_at"]) {
++            expect(names).toContain(col);
++        }
++    });
++});

@@ -1,0 +1,107 @@
+diff --git a/src/controllers/dbversion.controller.ts b/src/controllers/dbversion.controller.ts
+index df01440..b672c4f 100644
+--- a/src/controllers/dbversion.controller.ts
++++ b/src/controllers/dbversion.controller.ts
+@@ -1,6 +1,5 @@
+ import { dbVersionService } from "../servies/dbversion.service.js";
+ import { response } from "../utils/response.js";
+-import { jwtUtils } from "../utils/jwt.utils.js";
+ 
+ /**
+  * DB Version Controller
+@@ -55,25 +54,8 @@ export const dbVersionController = {
+         const IsFirstTimeLogin = req.body.IsFirstTimeLogin;
+         const GUIVersion = req.body.GUIVersion;
+ 
+-        // identify caller from access token (if sent)
+-        // valid token   -> userid taken from token, real profile can be sent
+-        // no/bad token  -> old builds, userId from body, never send personal data
+-        // **HJ - once all users are on new build, remove this and use authMiddleware on route
+-        let userId = Number(req.body.userId);
+-        let includeProfile = false;
+-
+-        const token = jwtUtils.extractTokenFromHeader(req.headers.authorization);
+-        if (token) {
+-            const verify = jwtUtils.verifyAccessToken(token);
+-            if (verify.success && verify.payload) {
+-                userId = Number(verify.payload.userid);
+-                includeProfile = true;
+-            }
+-        }
+-
+-        if (!includeProfile) {
+-            console.log("DBVersionController.check: tokenless call, placeholder profile will be sent");
+-        }
++        // userid comes only from verified access token (set by authMiddleware)
++        const userId = Number(req.user?.userid);
+ 
+         // 1) Validate request body existence and required field
+         if (!userId) {
+@@ -101,7 +83,7 @@ export const dbVersionController = {
+         }
+ 
+         // 3) Delegate version comparison and script generation to service layer
+-        const result = await dbVersionService.checkForUpdates(currentVersion, GUIVersion, userId, IsFirstTimeLogin, includeProfile);
++        const result = await dbVersionService.checkForUpdates(currentVersion, GUIVersion, userId, IsFirstTimeLogin);
+ 
+         // 4) Return service response as-is
+         return res.json(result);
+diff --git a/src/routes/dbversion.routes.ts b/src/routes/dbversion.routes.ts
+index 84329fb..2dd61e3 100644
+--- a/src/routes/dbversion.routes.ts
++++ b/src/routes/dbversion.routes.ts
+@@ -1,12 +1,14 @@
+ import { Router } from "express";
+ import { dbVersionController } from "../controllers/dbversion.controller.js";
++import { authMiddleware } from "../middlewares/auth.middleware.js";
+ 
+ const router = Router();
+ 
+ /**
+  * Checks client DB version and returns pending migration script (if any).
+  * POST /db/check-version
++ * Protected: requires valid access token, userid is taken from token only.
+  */
+-router.post("/check-version", dbVersionController.check);
++router.post("/check-version", authMiddleware, dbVersionController.check);
+ 
+ export default router;
+diff --git a/src/servies/dbversion.service.ts b/src/servies/dbversion.service.ts
+index 5dbea7f..2e051ea 100644
+--- a/src/servies/dbversion.service.ts
++++ b/src/servies/dbversion.service.ts
+@@ -13,8 +13,6 @@ export const dbVersionService = {
+    * Checks if client DB version is outdated and returns migration script if needed.
+    *
+    * @param currentVersion - DB version currently present on client (mobile)
+-   * @param includeProfile - true only when caller is verified by access token.
+-   *                         false -> placeholder user row, no personal data
+    * @returns apiResponse with migration info and SQL script
+    */
+   async checkForUpdates(
+@@ -22,7 +20,6 @@ export const dbVersionService = {
+     GUIVersion: string,
+     userId: number,
+     IsFirstTimeLogin: boolean,
+-    includeProfile: boolean,
+   ): Promise<apiResponse<any>> {
+     try {
+       // 1) Validate input
+@@ -94,16 +91,9 @@ export const dbVersionService = {
+       // user info will only be synced on first time login, so we can check for that
+       if (IsFirstTimeLogin) {
+         // Append dynamic user data sync queries
+-        // verified caller -> real profile
+-        // unverified caller -> placeholder row (same columns, blank values) so app can continue
+-        // without exposing personal data. email must stay unique on device.
+-        const userInsertQuery = includeProfile
+-          ? `INSERT INTO users ("id","name", "mobilenumber","password","email","age","gender","city","profession") VALUES (${userId},'${userData.name}', '${userData.mobilenumber ?? ""}','','${userData.email}',${userData.age},'${userData.gender ?? ""}','${userData.city ?? ""}','${userData.profession ?? ""}');`
+-          : `INSERT INTO users ("id","name", "mobilenumber","password","email","age","gender","city","profession") VALUES (${userId},'', '','','user${userId}@placeholder.local',null,'','','');`;
+-
+         const userSyncQuery = [
+           `DELETE FROM users where id = ${userId};`, // clear ALL previous user data
+-          userInsertQuery,
++          `INSERT INTO users ("id","name", "mobilenumber","password","email","age","gender","city","profession") VALUES (${userId},'${userData.name}', '${userData.mobilenumber ?? ""}','','${userData.email}',${userData.age},'${userData.gender ?? ""}','${userData.city ?? ""}','${userData.profession ?? ""}');`,
+         ];
+ 
+         scriptArray.push(...userSyncQuery);

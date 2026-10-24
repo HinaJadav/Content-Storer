@@ -1,0 +1,65 @@
+diff --git a/data/database/dbRepository/billRepo.ts b/data/database/dbRepository/billRepo.ts
+index 548cb26..e87145b 100644
+--- a/data/database/dbRepository/billRepo.ts
++++ b/data/database/dbRepository/billRepo.ts
+@@ -38,6 +38,31 @@ function buildDateRange(filter: FilterStateParams) {
+   return {};
+ }
+ 
++// UUID format (any version), e.g. 0190a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b
++const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
++
++// turns "1,2,3" (or "uuid1,uuid2") into placeholders "?,?,?" and the id values
++// - whole number -> kept as number (current integer ids)
++// - UUID         -> kept as lowercase text (ids after UUID migration)
++// - anything else is dropped, so nothing from the string goes into the SQL text
++function buildIdList(ids: string): { placeholders: string; values: (number | string)[] } {
++  const values: (number | string)[] = [];
++  const parts = ids.split(",");
++  for (const part of parts) {
++    const text = part.trim();
++    if (text === "") {
++      continue;
++    }
++    if (UUID_PATTERN.test(text)) {
++      values.push(text.toLowerCase());
++    } else if (Number.isInteger(Number(text))) {
++      values.push(Number(text));
++    }
++  }
++  const placeholders = values.map(() => "?").join(",");
++  return { placeholders, values };
++}
++
+ // get all bills in the format required for record grid, filtered by provided filter state
+ export async function getAllBills(
+   filter: FilterStateParams,
+@@ -101,7 +126,14 @@ export async function getAllBills(
+   // if category id provided then add where clause for that
+   // this is used to see record of specific category only
+   if (toAccId.trim().length > 0) {
+-    whereClauses.push("b.toaccid IN (" + toAccId + ")");
++    const idList = buildIdList(toAccId);
++    if (idList.values.length > 0) {
++      whereClauses.push(`b.toaccid IN (${idList.placeholders})`);
++      params.push(...idList.values);
++    } else {
++      // no valid id -> match nothing (never fall back to showing all records)
++      whereClauses.push("1 = 0");
++    }
+   }
+ 
+   const sql = `${baseSql} WHERE ${whereClauses.join(" AND ")} GROUP BY b.id ORDER BY b.date DESC`;
+@@ -315,8 +347,10 @@ export async function GetTotalBillByCatIds(
+                   FROM bill as b
+                   LEFT JOIN category c ON c.id = b.toaccid`;
+ 
+-  const whereClauses: string[] = [`b.toaccid IN (${catIds}) `];
+-  const params: any[] = [];
++  // ids go as ? params; this clause is first, so its values go first in params
++  const idList = buildIdList(catIds);
++  const whereClauses: string[] = [`b.toaccid IN (${idList.placeholders})`];
++  const params: any[] = [...idList.values];
+ 
+   // exclude SMS-captured drafts from per-category totals
+   const completedOnly = completedBillsOnly("b");

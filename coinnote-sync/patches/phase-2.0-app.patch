@@ -1,0 +1,39 @@
+diff --git a/util/utilFunctions.ts b/util/utilFunctions.ts
+index 8d3410c..d29cc44 100644
+--- a/util/utilFunctions.ts
++++ b/util/utilFunctions.ts
+@@ -3,6 +3,7 @@ import { GetUserById } from "@/data/database/dbRepository/userRepo";
+ import { initializeDatabase } from "@/data/database/runMigrations";
+ import AsyncStorage from "@react-native-async-storage/async-storage";
+ import NetInfo from "@react-native-community/netinfo";
++import * as Application from "expo-application";
+ import Constants from "expo-constants";
+ import * as SecureStore from "expo-secure-store";
+ import { verifyEnvelope } from "./signatureValidator";
+@@ -95,6 +96,10 @@ export async function CheckAndRunMigration() {
+   // store db migration scripts
+   let resData: any;
+ 
++  // Play Store version code of this build (android versionCode), server uses it
++  // to decide which migrations and default queries this build may get
++  const versionCode = Number(Application.nativeBuildVersion) || 0;
++
+   // check if db version is exist and greater then 0;
+   if (lastMigratedVersion !== null && Number(lastMigratedVersion) >= 0) {
+     // this flag determines whether it is first time user login on this device then
+@@ -107,6 +112,7 @@ export async function CheckAndRunMigration() {
+       userId: userId,
+       IsFirstTimeLogin: IsFirstTimeLogin,
+       GUIVersion: Constants.expoConfig?.version,
++      versionCode: versionCode,
+     });
+   } else {
+     // get migration data with current gui version set (temporory set to 1) and version number set to 0
+@@ -116,6 +122,7 @@ export async function CheckAndRunMigration() {
+       userId: userId,
+       IsFirstTimeLogin: true,
+       GUIVersion: Constants.expoConfig?.version,
++      versionCode: versionCode,
+     });
+   }
+ 

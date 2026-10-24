@@ -1,0 +1,198 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index eea9fa8..493bdaa 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -7,54 +7,9 @@ generator client {
+   provider = "prisma-client-js"
+ }
+ 
+-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+-model accounttype {
+-  id             Int         @id @default(autoincrement())
+-  userid         Int
+-  name           String      @db.VarChar(100)
+-  acctypeenum    accTypeEnum
+-  initialamount  Decimal     @db.Decimal(12, 2)
+-  currentbalance Decimal     @db.Decimal(12, 2)
+-  icon           String?
+-}
+ 
+-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+-model bill {
+-  id            Int                @id @default(autoincrement())
+-  amount        Decimal            @db.Decimal(12, 2)
+-  toaccid       Int
+-  fromaccid     Int
+-  userid        Int
+-  date          DateTime           @db.Date
+-  typeofbill    typeOfBillTypeEnum
+-  title         String             @db.VarChar(150)
+-  description   String?
+-  docurlstrings String[]
+-}
+ 
+-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+-model budget {
+-  id            Int            @id @default(autoincrement())
+-  year          Int
+-  month         Int?
+-  userid        Int
+-  categoryid    Int
+-  initialbudget Decimal        @db.Decimal(12, 2)
+-  usedamount    Decimal?       @default(0.00) @db.Decimal(12, 2)
+-  type          budgetTypeEnum
+-}
+ 
+-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+-model category {
+-  id               Int                @id @default(autoincrement())
+-  name             String             @db.VarChar(100)
+-  userid           Int
+-  rootcategoryid   Int?
+-  parentid         Int?
+-  typeofcategory   typeOfCategoryEnum
+-  icon             String?            @db.VarChar(255)
+-  autorepeatbudget Boolean?           @default(false)
+-}
+ 
+ /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+ model plantypes {
+@@ -71,14 +26,6 @@ model premiumuser {
+   @@id([userid, planid])
+ }
+ 
+-model savingsaccdetails {
+-  accid             Int       @id
+-  initialgoal       Decimal   @db.Decimal(12, 2)
+-  numofinstallments Int
+-  isautomated       Boolean?  @default(false)
+-  autodate          DateTime? @db.Date
+-  autoamount        Decimal?  @db.Decimal(12, 2)
+-}
+ 
+ 
+ model refreshtoken {
+@@ -111,6 +58,10 @@ model users {
+   profession     String?  @db.VarChar(100)
+   ispremiumuser  Boolean?  @default(false)
+   trialstartdate DateTime? @db.Date
++
++  // ----- cloud sync -----
++  current_seq    BigInt     @default(0)      // per-user change counter, last issued seq
++  cloud_state    String     @default("none") // none | imported | seeded (CHECK in migration)
+ }
+ 
+ model dbversions {
+@@ -124,26 +75,9 @@ model defaultQuery {
+   query          String   @db.Text
+ }
+ 
+-enum accTypeEnum {
+-  N
+-  S
+-}
+ 
+-enum typeOfBillTypeEnum {
+-  I
+-  E
+-  T
+-}
+ 
+-enum budgetTypeEnum {
+-  M
+-  Y
+-}
+ 
+-enum typeOfCategoryEnum {
+-  I
+-  E
+-}
+ 
+ enum planTypeEnum {
+   M
+@@ -179,4 +113,83 @@ model app_config {
+   id          Int      @id @default(autoincrement())
+   key         String   @unique @db.Text
+   value       String   @db.Text
+-}
+\ No newline at end of file
++}
++
++// =====================================================================
++// Cloud sync tables (Phase 1.2)
++// - id is a uuid created on the phone; PK is (user_id, id) so a user can
++//   only ever reach their own rows
++// - project rule: NO foreign keys at DB level. category_id / parent_id are
++//   plain columns; same-user checks are done in code (sync push)
++// - type columns are text + CHECK (CHECKs hand-written in migration)
++// - deletes remove the row; change_log keeps a 'delete' note (D3)
++// - money in whole paise (D4)
++// =====================================================================
++
++model category {
++  user_id        Int
++  id             String     @db.Uuid
++  name           String     @db.VarChar(100)
++  type           String // I | E
++  parent_id      String?    @db.Uuid
++  icon           String?    @db.VarChar(255)
++  updated_seq    BigInt
++  last_op_id     String?    @db.Uuid
++  created_at     DateTime   @default(now()) @db.Timestamptz(3)
++  updated_at     DateTime   @default(now()) @updatedAt @db.Timestamptz(3)
++
++  @@id([user_id, id])
++  @@index([user_id, updated_seq])
++  @@index([user_id, parent_id])
++}
++
++model bill {
++  user_id      Int
++  id           String   @db.Uuid
++  category_id  String   @db.Uuid
++  amount_paise BigInt
++  type         String // I | E | T
++  date         DateTime @db.Timestamp(0) // phone local wall-clock time, no timezone
++  title        String   @db.VarChar(150)
++  description  String?  @db.VarChar(1000)
++  updated_seq  BigInt
++  last_op_id   String?  @db.Uuid
++  created_at   DateTime @default(now()) @db.Timestamptz(3)
++  updated_at   DateTime @default(now()) @updatedAt @db.Timestamptz(3)
++
++  @@id([user_id, id])
++  @@index([user_id, updated_seq])
++  @@index([user_id, category_id])
++}
++
++model budget {
++  user_id     Int
++  id          String   @db.Uuid
++  category_id String   @db.Uuid
++  year        Int
++  month       Int? // null = yearly budget
++  type        String // M | Y
++  limit_paise BigInt
++  updated_seq BigInt
++  last_op_id  String?  @db.Uuid
++  created_at  DateTime @default(now()) @db.Timestamptz(3)
++  updated_at  DateTime @default(now()) @updatedAt @db.Timestamptz(3)
++
++  @@id([user_id, id])
++  @@index([user_id, updated_seq])
++  @@index([user_id, category_id])
++}
++
++// one row per issued seq; pull reads this to find what changed after a cursor
++model change_log {
++  user_id       Int
++  seq           BigInt
++  entity        String // category | bill | budget
++  row_id        String   @db.Uuid
++  op            String // upsert | delete
++  origin_device String?  @db.Uuid // device that made the change (pull skips own changes)
++  created_at    DateTime @default(now()) @db.Timestamptz(3)
++
++  @@id([user_id, seq])
++  @@index([user_id, row_id])
++}

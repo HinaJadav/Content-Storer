@@ -1,0 +1,73 @@
+diff --git a/scripts/testSyncSchema.ts b/scripts/testSyncSchema.ts
+new file mode 100644
+index 0000000..92f8466
+--- /dev/null
++++ b/scripts/testSyncSchema.ts
+@@ -0,0 +1,67 @@
++/// <reference types="node" />
++/**
++ * Sync schema tests (Phase 1.4)
++ * -----------------------------
++ * Checks the DB rules from prisma/schema.prisma + prisma/manual/20261018_sync_checks.sql.
++ * Everything runs inside ONE transaction that is always rolled back, so no data is left behind.
++ * Each case runs in its own SAVEPOINT, so an expected failure does not break the next case.
++ *
++ * Run (point DATABASE_URL at a TEST database):
++ *   npx tsx scripts/testSyncSchema.ts
++ */
++import prisma from "../src/config/prisma.config.js";
++
++const U1 = 900000001; // test users, high ids so they never clash with real users
++const U2 = 900000002;
++const CAT = "01900000-0000-7000-8000-000000000001";
++
++// [name, sql, shouldSucceed]
++const CASES: [string, string, boolean][] = [
++    ["insert test users", `INSERT INTO users (id,name,password,mobilenumber,email) VALUES (${U1},'T1','x','t1','t1@test'),(${U2},'T2','x','t2','t2@test')`, true],
++    ["valid category", `INSERT INTO category (user_id,id,name,type,updated_seq) VALUES (${U1},'${CAT}','Food','E',1)`, true],
++    ["category bad type", `INSERT INTO category (user_id,id,name,type,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-000000000002','X','Q',2)`, false],
++    ["same uuid for another user", `INSERT INTO category (user_id,id,name,type,updated_seq) VALUES (${U2},'${CAT}','Food','E',1)`, true],
++    ["duplicate uuid same user", `INSERT INTO category (user_id,id,name,type,updated_seq) VALUES (${U1},'${CAT}','Dup','E',3)`, false],
++    ["valid bill", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000b1','${CAT}',45050,'E','2026-10-18 10:30:00','Tea',4)`, true],
++    ["bill zero amount", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000b2','${CAT}',0,'E','2026-10-18 10:30:00','Zero',5)`, false],
++    ["bill bad type", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000b3','${CAT}',100,'X','2026-10-18 10:30:00','Bad',6)`, false],
++    ["valid monthly budget", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d1','${CAT}',2026,10,'M',500000,7)`, true],
++    ["duplicate budget period", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d2','${CAT}',2026,10,'M',100,8)`, false],
++    ["monthly budget without month", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d3','${CAT}',2026,NULL,'M',100,9)`, false],
++    ["valid yearly budget", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d4','${CAT}',2026,NULL,'Y',100,10)`, true],
++    ["yearly budget with month", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d5','${CAT}',2027,5,'Y',100,11)`, false],
++    ["valid change_log", `INSERT INTO change_log (user_id,seq,entity,row_id,op) VALUES (${U1},1,'bill','01900000-0000-7000-8000-0000000000b1','delete')`, true],
++    ["change_log bad op", `INSERT INTO change_log (user_id,seq,entity,row_id,op) VALUES (${U1},2,'bill','01900000-0000-7000-8000-0000000000b1','edit')`, false],
++    ["bad cloud_state", `UPDATE users SET cloud_state='weird' WHERE id=${U1}`, false],
++];
++
++const ROLLBACK = new Error("rollback test data");
++
++async function main() {
++    let failed = 0;
++    try {
++        await prisma.$transaction(async (tx) => {
++            for (const [name, sql, shouldSucceed] of CASES) {
++                await tx.$executeRawUnsafe("SAVEPOINT test_case");
++                let ok = true;
++                try {
++                    await tx.$executeRawUnsafe(sql);
++                } catch {
++                    ok = false;
++                    await tx.$executeRawUnsafe("ROLLBACK TO SAVEPOINT test_case");
++                }
++                const pass = ok === shouldSucceed;
++                if (!pass) failed++;
++                console.log(`${pass ? "PASS" : "FAIL"}  ${name} (expected ${shouldSucceed ? "success" : "rejection"})`);
++            }
++            throw ROLLBACK; // always undo everything
++        }, { maxWait: 10000, timeout: 60000 }); // remote DB: allow up to 60s for all cases
++    } catch (error) {
++        if (error !== ROLLBACK) throw error;
++    }
++    console.log(`\n${CASES.length - failed}/${CASES.length} passed`);
++    await prisma.$disconnect();
++    process.exit(failed > 0 ? 1 : 0);
++}
++
++main();

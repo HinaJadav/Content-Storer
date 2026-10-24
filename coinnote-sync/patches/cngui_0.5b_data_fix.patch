@@ -1,0 +1,861 @@
+diff --git a/app/(protected)/modals/AddCategory/SelectParentCategoryScreen.tsx b/app/(protected)/modals/AddCategory/SelectParentCategoryScreen.tsx
+index 4bc322f..403bcac 100644
+--- a/app/(protected)/modals/AddCategory/SelectParentCategoryScreen.tsx
++++ b/app/(protected)/modals/AddCategory/SelectParentCategoryScreen.tsx
+@@ -46,14 +46,14 @@ const SelectParentCategoryScreen = ({ type, onSelect }: Props) => {
+       if (parentId !== null) {
+         setStack((prev) => [...prev, current]);
+       }
+-      setCurrent(result.Data.Data);
++      setCurrent(result.Data);
+     }
+   };
+ 
+   const onCategoryPress = async (cat: Category) => {
+     const result = await getCategories(type, "", cat.id, userState.userId || 0);
+     if (!result.IsError) {
+-      if (result.Data.Data && result.Data.Data.length > 0) {
++      if (result.Data && result.Data.length > 0) {
+         loadCategories(cat.id);
+       } else {
+         onSelect(cat); // ✅ final leaf selected
+diff --git a/app/(protected)/modals/AddRecord/SelectCategoryScreen.tsx b/app/(protected)/modals/AddRecord/SelectCategoryScreen.tsx
+index deb4128..6846993 100644
+--- a/app/(protected)/modals/AddRecord/SelectCategoryScreen.tsx
++++ b/app/(protected)/modals/AddRecord/SelectCategoryScreen.tsx
+@@ -82,14 +82,14 @@ const SelectCategoryScreen = ({ type, onSelect }: Props) => {
+       if (parentId !== null) {
+         setStack((prev) => [...prev, current]);
+       }
+-      setCurrent(result.Data.Data);
++      setCurrent(result.Data);
+     }
+   };
+ 
+   const onCategoryPress = async (cat: Category) => {
+     const result = await getCategories(type, "", cat.id, userState.userId || 0);
+     if (!result.IsError) {
+-      if (result.Data.Data && result.Data.Data.length > 0) {
++      if (result.Data && result.Data.length > 0) {
+         loadCategories(cat.id);
+       } else {
+         onSelect(cat); // ✅ final leaf selected
+diff --git a/app/(protected)/modals/Profile/CurrencySetup.tsx b/app/(protected)/modals/Profile/CurrencySetup.tsx
+index 8aedc5b..c2ae698 100644
+--- a/app/(protected)/modals/Profile/CurrencySetup.tsx
++++ b/app/(protected)/modals/Profile/CurrencySetup.tsx
+@@ -73,7 +73,7 @@ const CurrencySetup = () => {
+   useEffect(() => {
+     const fetchCurrency = async () => {
+       const storedCurrency: string =
+-        (await getConfigValueContext("currency"))?.Data?.Data?.[0]?.value ??
++        (await getConfigValueContext("currency"))?.Data?.[0]?.value ??
+         "INR";
+       if (storedCurrency) {
+         setCurrency(storedCurrency);
+diff --git a/app/(protected)/modals/ViewRecord/ViewRecordScreen.tsx b/app/(protected)/modals/ViewRecord/ViewRecordScreen.tsx
+index fae71d8..5a0cb3c 100644
+--- a/app/(protected)/modals/ViewRecord/ViewRecordScreen.tsx
++++ b/app/(protected)/modals/ViewRecord/ViewRecordScreen.tsx
+@@ -27,10 +27,10 @@ const ViewRecordScreen = () => {
+       if (id) {
+         try {
+           const result = await getBillById(Number(id));
+-          ////console.log(result.Data.Data[0]);
++          ////console.log(result.Data[0]);
+           if (result.IsError === false && result.Data) {
+             // Transform the bill data to RecordPopupParams format
+-            const bill = result.Data.Data[0];
++            const bill = result.Data[0];
+             const transformedData: RecordPopupParams = {
+               id: bill.id.toString(),
+               image: bill.image, // Assuming image is a URL string
+diff --git a/components/insights/EFofIFgraph.tsx b/components/insights/EFofIFgraph.tsx
+index ddeffb0..b4da16e 100644
+--- a/components/insights/EFofIFgraph.tsx
++++ b/components/insights/EFofIFgraph.tsx
+@@ -107,7 +107,7 @@ const EFofIFgraph = ({
+     });
+ 
+     // label the parent's own bills row
+-    const fetched: EForIfGraphDataParams[] = dbData.Data.Data.map(
++    const fetched: EForIfGraphDataParams[] = dbData.Data.map(
+       (item: EForIfGraphDataParams) =>
+         item.isdirect ? { ...item, name: `${item.name} (Parent)` } : item,
+     );
+diff --git a/data/database/dbRepository/backupRepo.ts b/data/database/dbRepository/backupRepo.ts
+index c1cc502..59642d3 100644
+--- a/data/database/dbRepository/backupRepo.ts
++++ b/data/database/dbRepository/backupRepo.ts
+@@ -4,7 +4,7 @@ import { execute, query } from "../execute";
+ 
+ // Handles execute.ts's known double-nested Data bug — unwrap safely
+ function unwrapQueryResult<T>(result: any): T[] {
+-  const inner = result?.Data?.Data ?? result?.Data;
++  const inner = result?.Data ?? result?.Data;
+   return Array.isArray(inner) ? inner : [];
+ }
+ 
+diff --git a/data/database/dbRepository/budgetRepo.ts b/data/database/dbRepository/budgetRepo.ts
+index 1df50a3..587f496 100644
+--- a/data/database/dbRepository/budgetRepo.ts
++++ b/data/database/dbRepository/budgetRepo.ts
+@@ -165,7 +165,7 @@ export async function insertOrUpdateBudget({
+     ]);
+ 
+     let result;
+-    if (checkResult.Data.Data && checkResult.Data.Data.length > 0) {
++    if (checkResult.Data && checkResult.Data.length > 0) {
+       // Budget exists, update it
+       const updateSql = `
+                 UPDATE budget 
+diff --git a/data/database/dbRepository/configRepo.ts b/data/database/dbRepository/configRepo.ts
+index 6ee0269..3b17882 100644
+--- a/data/database/dbRepository/configRepo.ts
++++ b/data/database/dbRepository/configRepo.ts
+@@ -19,7 +19,7 @@ import { execute, query } from "../execute";
+  * cloud/website version does not inherit keys that only make sense on a handset.
+  */
+ 
+-// titleData.Data.Data[0].name
++// titleData.Data[0].name
+ export async function getConfigValueContext(key: string) {
+   const sql = `SELECT value from config WHERE key = ?`;
+   return await query(sql, [key]);
+diff --git a/data/database/dbRepository/debugRepo.ts b/data/database/dbRepository/debugRepo.ts
+index 2ce973e..9e77447 100644
+--- a/data/database/dbRepository/debugRepo.ts
++++ b/data/database/dbRepository/debugRepo.ts
+@@ -20,13 +20,13 @@ export async function debugTableExists(name: string): Promise<boolean> {
+     `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`,
+     [name],
+   );
+-  return !result.IsError && (result.Data?.Data?.length ?? 0) > 0;
++  return !result.IsError && (result.Data?.length ?? 0) > 0;
+ }
+ 
+ /** Column names on `bill`, to confirm the ATT migration landed. */
+ export async function debugBillColumns(): Promise<string[]> {
+   const result = await query<{ name: string }>(`PRAGMA table_info("bill")`);
+-  const rows: { name: string }[] = result.Data?.Data ?? [];
++  const rows: { name: string }[] = result.Data ?? [];
+   return rows.map((r) => r.name);
+ }
+ 
+@@ -35,7 +35,7 @@ export async function debugLocalConfig(): Promise<{ key: string; value: string }
+   const result = await query<{ key: string; value: string }>(
+     `SELECT key, value FROM localconfig ORDER BY key ASC`,
+   );
+-  return result.Data?.Data ?? [];
++  return result.Data ?? [];
+ }
+ 
+ /** ATT keys that wrongly ended up in `config` — a sign of an older build. */
+@@ -43,7 +43,7 @@ export async function debugStrayAttConfig(): Promise<{ key: string; value: strin
+   const result = await query<{ key: string; value: string }>(
+     `SELECT key, value FROM config WHERE key LIKE 'att%' ORDER BY key ASC`,
+   );
+-  return result.Data?.Data ?? [];
++  return result.Data ?? [];
+ }
+ 
+ /** Sender patterns exactly as stored, so escaping damage is visible. */
+@@ -53,7 +53,7 @@ export async function debugPatterns(): Promise<
+   const result = await query<any>(
+     `SELECT id, sender, direction, regex, fields FROM smssenderpattern ORDER BY id ASC`,
+   );
+-  return result.Data?.Data ?? [];
++  return result.Data ?? [];
+ }
+ 
+ /** Most recent captured drafts. */
+@@ -67,7 +67,7 @@ export async function debugDrafts(
+        FROM bill WHERE billstatus = 'D' ORDER BY id DESC LIMIT ?`,
+     [limit],
+   );
+-  return result.Data?.Data ?? [];
++  return result.Data ?? [];
+ }
+ 
+ /** How many drafts are waiting, for any user. */
+@@ -75,7 +75,7 @@ export async function debugDraftCount(): Promise<number> {
+   const result = await query<{ c: number }>(
+     `SELECT COUNT(*) AS c FROM bill WHERE billstatus = 'D'`,
+   );
+-  return Number(result.Data?.Data?.[0]?.c ?? 0);
++  return Number(result.Data?.[0]?.c ?? 0);
+ }
+ 
+ // -------------------------------------------------------------------------------------------
+diff --git a/data/database/dbRepository/localConfigRepo.ts b/data/database/dbRepository/localConfigRepo.ts
+index 56dd2f0..e22d3c4 100644
+--- a/data/database/dbRepository/localConfigRepo.ts
++++ b/data/database/dbRepository/localConfigRepo.ts
+@@ -39,7 +39,7 @@ export async function getLocalConfigValue(key: string): Promise<string | null> {
+ 
+   if (result.IsError) return null;
+ 
+-  return (result.Data?.Data?.[0] as any)?.value ?? null;
++  return (result.Data?.[0] as any)?.value ?? null;
+ }
+ 
+ /**
+diff --git a/data/database/dbRepository/notificationRepo.ts b/data/database/dbRepository/notificationRepo.ts
+index 09f9144..97439a3 100644
+--- a/data/database/dbRepository/notificationRepo.ts
++++ b/data/database/dbRepository/notificationRepo.ts
+@@ -2,10 +2,10 @@
+ // Dates are 'YYYY-MM-DD' and ranges are half-open: date >= from AND date < to.
+ // Details: docs/notifications/06-reschedule-on-change.md
+ //
+-// execute.ts nests its result, like the rest of the app:
+-//   rows           -> result.Data.Data
+-//   query failure  -> result.Data.IsError (top-level IsError stays false)
+-// Callers must treat missing rows as "no data" instead of trusting result.IsError.
++// execute.ts result shape:
++//   rows           -> result.Data
++//   query failure  -> result.IsError (Data is an empty array)
++// Callers treat missing rows as "no data".
+ 
+ import { ResponseParams } from "@/interfaces/interface";
+ import { query } from "../execute";
+diff --git a/data/database/dbRepository/smsPatternRepo.ts b/data/database/dbRepository/smsPatternRepo.ts
+index 7c1b97b..19b6574 100644
+--- a/data/database/dbRepository/smsPatternRepo.ts
++++ b/data/database/dbRepository/smsPatternRepo.ts
+@@ -57,7 +57,7 @@ export async function getSenderPatterns(): Promise<
+       ORDER BY id ASC`,
+   );
+ 
+-  const rows = (result.Data?.Data as SmsSenderPattern[] | undefined) ?? [];
++  const rows = (result.Data as SmsSenderPattern[] | undefined) ?? [];
+   return response<SmsSenderPattern[]>(rows);
+ }
+ 
+@@ -74,7 +74,7 @@ export async function getPatternByKey(
+     [sender, regex],
+   );
+ 
+-  const rows = (result.Data?.Data as SmsSenderPattern[] | undefined) ?? [];
++  const rows = (result.Data as SmsSenderPattern[] | undefined) ?? [];
+   return rows[0] ?? null;
+ }
+ 
+@@ -135,7 +135,7 @@ export async function deleteSenderPattern(
+     [id],
+   );
+   const stillThere =
+-    ((result.Data?.Data as { count: number }[] | undefined)?.[0]?.count ?? 0) > 0;
++    ((result.Data as { count: number }[] | undefined)?.[0]?.count ?? 0) > 0;
+ 
+   if (stillThere) {
+     return response<boolean>(
+diff --git a/data/database/execute.ts b/data/database/execute.ts
+index 017769e..15bce5d 100644
+--- a/data/database/execute.ts
++++ b/data/database/execute.ts
+@@ -1,96 +1,91 @@
+-/**
+- * SQL Execution Helper
+- * ---------------------
+- * This module provides a thin wrapper around the SQLite database instance
+- * to execute raw SQL queries in a clean and centralized way.
+- *
+- * Purpose:
+- * - Offer a unified API for running raw SQL statements across the app.
+- * - Reduce repeated boilerplate such as try/catch blocks and argument binding.
+- * - Keep low-level DB operations separate from repositories and services.
+- *
+- * Why Centralize Raw Execution?
+- * - Helps maintain a clean data access layer.
+- * - Ensures all SQL interactions pass through a predictable and safe path.
+- * - Allows logging, error tracking, or performance measurement in one place.
+- * - Prevents scattered “db.runSync()” calls across multiple files.
+- *
+- * Behavior:
+- * - Executes the provided SQL string directly on the singleton DB instance.
+- * - Supports both:
+- *      - `run` operations (INSERT, UPDATE, DELETE)
+- *      - `select` operations (SELECT returning rows)
+- * - Arguments can be passed as an array and are safely bound to SQL parameters.
+- * - Errors are caught and rethrown with context for easier debugging.
+- *
+- * Important Notes:
+- * - This is a low-level helper; business logic should be implemented in
+- *   repositories and services—not directly inside this file.
+- * - Avoid building dynamic SQL strings using user input. Always use
+- *   parameter binding to prevent SQL injection.
+- * - Keep the SQL here simple; complex logic belongs in repository-level helpers.
+- *
+- * Usage Example:
+- *   import { execute, query } from './execute';
+- *
+- *   // For INSERT/UPDATE/DELETE
+- *   await execute(
+- *     "INSERT INTO expenses (title, amount) VALUES (?, ?)",
+- *     ["Coffee", 120]
+- *   );
+- *
+- *   // For SELECT queries
+- *   const rows = await query(
+- *     "SELECT * FROM expenses WHERE amount > ?",
+- *     [100]
+- *   );
+- *
+- * Extendability:
+- * - Logging can be added to inspect executed SQL.
+- * - Analytics can be added to measure slow queries.
+- * - Transactions can be integrated at this layer if required.
+- */
+-import { response } from "@/util/response";
+-import { db } from "./db.config";
+-
+-// Execute a raw SQL statement (INSERT, UPDATE, DELETE)
+-export function execute(sql: string, args: any[] = []) {
+-  try {
+-    db.runSync(sql, args);
+-  } catch (error) {
+-    return response({
+-      IsError: true,
+-      ErrorMessage: `SQL Execution Error: ${error instanceof Error ? error.message : String(error)}`,
+-    });
+-  }
+-  return response({ IsError: false, ErrorMessage: "" });
+-}
+-
+-// Execute a raw SQL query (SELECT) and return the resulting rows
+-export function query<T = any>(sql: string, args: any[] = []) {
+-  let result;
+-  try {
+-    result = db.getAllSync<T>(sql, args);
+-  } catch (error) {
+-    return response({
+-      IsError: true,
+-      ErrorMessage: `SQL Query Error: ${error instanceof Error ? error.message : String(error)}`,
+-    });
+-    //throw new Error(`Failed to execute SQL query: ${error instanceof Error ? error.message : String(error)}`);
+-  }
+-  return response<T>({ Data: result, IsError: false, ErrorMessage: "" });
+-}
+-
+-export function runInTransaction(fn: () => void) {
+-  try {
+-    db.withTransactionSync(() => {
+-      fn();
+-    });
+-    return response({ IsError: false, ErrorMessage: "" });
+-  } catch (error) {
+-    return response({
+-      IsError: true,
+-      ErrorMessage: `Transaction failed: ${error instanceof Error ? error.message : String(error)}`,
+-    });
+-  }
+-}
++/**
++ * SQL Execution Helper
++ * ---------------------
++ * This module provides a thin wrapper around the SQLite database instance
++ * to execute raw SQL queries in a clean and centralized way.
++ *
++ * Purpose:
++ * - Offer a unified API for running raw SQL statements across the app.
++ * - Reduce repeated boilerplate such as try/catch blocks and argument binding.
++ * - Keep low-level DB operations separate from repositories and services.
++ *
++ * Why Centralize Raw Execution?
++ * - Helps maintain a clean data access layer.
++ * - Ensures all SQL interactions pass through a predictable and safe path.
++ * - Allows logging, error tracking, or performance measurement in one place.
++ * - Prevents scattered “db.runSync()” calls across multiple files.
++ *
++ * Behavior:
++ * - Executes the provided SQL string directly on the singleton DB instance.
++ * - Supports both:
++ *      - `run` operations (INSERT, UPDATE, DELETE)
++ *      - `select` operations (SELECT returning rows)
++ * - Arguments can be passed as an array and are safely bound to SQL parameters.
++ * - Errors are caught and rethrown with context for easier debugging.
++ *
++ * Important Notes:
++ * - This is a low-level helper; business logic should be implemented in
++ *   repositories and services—not directly inside this file.
++ * - Avoid building dynamic SQL strings using user input. Always use
++ *   parameter binding to prevent SQL injection.
++ * - Keep the SQL here simple; complex logic belongs in repository-level helpers.
++ *
++ * Usage Example:
++ *   import { execute, query } from './execute';
++ *
++ *   // For INSERT/UPDATE/DELETE
++ *   await execute(
++ *     "INSERT INTO expenses (title, amount) VALUES (?, ?)",
++ *     ["Coffee", 120]
++ *   );
++ *
++ *   // For SELECT queries
++ *   const rows = await query(
++ *     "SELECT * FROM expenses WHERE amount > ?",
++ *     [100]
++ *   );
++ *
++ * Extendability:
++ * - Logging can be added to inspect executed SQL.
++ * - Analytics can be added to measure slow queries.
++ * - Transactions can be integrated at this layer if required.
++ */
++import { response } from "@/util/response";
++import { db } from "./db.config";
++
++// Execute a raw SQL statement (INSERT, UPDATE, DELETE)
++// Data is null; check IsError / ErrorMessage
++export function execute(sql: string, args: any[] = []) {
++  try {
++    db.runSync(sql, args);
++  } catch (error) {
++    const message = `SQL Execution Error: ${error instanceof Error ? error.message : String(error)}`;
++    return response(null, true, message, 500);
++  }
++  return response(null, false, "", 200);
++}
++
++// Execute a raw SQL query (SELECT) and return the resulting rows
++// Data is the rows array directly
++export function query<T = any>(sql: string, args: any[] = []) {
++  let result: T[] = [];
++  try {
++    result = db.getAllSync<T>(sql, args);
++  } catch (error) {
++    const message = `SQL Query Error: ${error instanceof Error ? error.message : String(error)}`;
++    return response<T[]>([], true, message, 500);
++  }
++  return response<T[]>(result, false, "", 200);
++}
++
++export function runInTransaction(fn: () => void) {
++  try {
++    db.withTransactionSync(() => {
++      fn();
++    });
++    return response(null, false, "", 200);
++  } catch (error) {
++    const message = `Transaction failed: ${error instanceof Error ? error.message : String(error)}`;
++    return response(null, true, message, 500);
++  }
++}
+diff --git a/data/database/schemaInfo.ts b/data/database/schemaInfo.ts
+index 6f6eea1..dc498ba 100644
+--- a/data/database/schemaInfo.ts
++++ b/data/database/schemaInfo.ts
+@@ -30,7 +30,7 @@ export function hasBillStatusColumn(): boolean {
+   if (hasBillStatus !== undefined) return hasBillStatus;
+ 
+   const result = query<{ name: string }>(`PRAGMA table_info("bill")`);
+-  const columns: { name: string }[] = result.Data?.Data ?? [];
++  const columns: { name: string }[] = result.Data ?? [];
+ 
+   // on a query error `Data.Data` is absent, so this lands on false — and an unfiltered
+   // query still returns correct (if unfiltered) results, which is the safe way to fail here
+@@ -56,7 +56,7 @@ export function hasLocalConfigTable(): boolean {
+     `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'localconfig' LIMIT 1`,
+   );
+ 
+-  hasLocalConfig = !result.IsError && (result.Data?.Data?.length ?? 0) > 0;
++  hasLocalConfig = !result.IsError && (result.Data?.length ?? 0) > 0;
+   return hasLocalConfig;
+ }
+ 
+diff --git a/features/Budget/BudgetProcess.ts b/features/Budget/BudgetProcess.ts
+index a542478..1e207a5 100644
+--- a/features/Budget/BudgetProcess.ts
++++ b/features/Budget/BudgetProcess.ts
+@@ -32,7 +32,7 @@ export async function DoesCategoryHaveChildren(
+   if (result.IsError) {
+     return false;
+   }
+-  return result.Data.Data[0].count > 0;
++  return result.Data[0].count > 0;
+ }
+ 
+ // does category has child categories with budget set for the month year 
+@@ -46,7 +46,7 @@ export async function DoesCategoryHaveChildWithBudgetSet(
+   if (result.IsError) {
+     return false;
+   }
+-  return result.Data.Data[0].count > 0;
++  return result.Data[0].count > 0;
+ }
+ 
+ // set or update budget for a category
+diff --git a/features/Budget/BudgetScreen.tsx b/features/Budget/BudgetScreen.tsx
+index 99ac657..55d727f 100644
+--- a/features/Budget/BudgetScreen.tsx
++++ b/features/Budget/BudgetScreen.tsx
+@@ -118,7 +118,7 @@ const BudgetScreen = ({ categoryId, title }: BudgetScreenProps) => {
+         search: filterStateValue.search || "",
+       });
+       if (!result.IsError) {
+-        setListA(result.Data.Data);
++        setListA(result.Data);
+       }
+     } catch (error) {
+       //console.error('Error loading categories:', error);
+diff --git a/features/Category/CategoryProcess.ts b/features/Category/CategoryProcess.ts
+index 6f4731a..aac0e4c 100644
+--- a/features/Category/CategoryProcess.ts
++++ b/features/Category/CategoryProcess.ts
+@@ -30,8 +30,8 @@ export async function hasChildCategories(
+ ): Promise<boolean> {
+   try {
+     const result = await getChildCategoriesCount(categoryId);
+-    if (!result.IsError && result.Data && result.Data.Data) {
+-      const countResult = result.Data.Data[0] as any;
++    if (!result.IsError && result.Data && result.Data) {
++      const countResult = result.Data[0] as any;
+       return countResult.count > 0;
+     }
+     return false;
+diff --git a/features/Category/CategoryScreen.tsx b/features/Category/CategoryScreen.tsx
+index 9ff9e72..179f9a7 100644
+--- a/features/Category/CategoryScreen.tsx
++++ b/features/Category/CategoryScreen.tsx
+@@ -86,8 +86,8 @@ const CategoryScreen = ({ categoryId, title }: CategoryScreenProps) => {
+         loadCategoriesForParent(null, search ?? "", userId || 0, "E"),
+         loadCategoriesForParent(null, search ?? "", userId || 0, "I"),
+       ]);
+-      setListA(expense.Data.Data);
+-      setListB(income.Data.Data);
++      setListA(expense.Data);
++      setListB(income.Data);
+     } else {
+       // drill-down: fetch children of categoryId
+       const result = await loadCategoriesForParent(
+@@ -95,7 +95,7 @@ const CategoryScreen = ({ categoryId, title }: CategoryScreenProps) => {
+         search ?? "",
+         userId || 0,
+       );
+-      setListA(result.Data.Data);
++      setListA(result.Data);
+     }
+ 
+     hideLoader();
+diff --git a/features/Debug/AttDebugProcess.ts b/features/Debug/AttDebugProcess.ts
+index 767e65e..680e40d 100644
+--- a/features/Debug/AttDebugProcess.ts
++++ b/features/Debug/AttDebugProcess.ts
+@@ -201,7 +201,7 @@ export const AddKnownPatterns = async (): Promise<number> => {
+   let written = 0;
+   for (const p of KNOWN_PATTERNS) {
+     const r = await debugUpsertPattern(p.sender, p.regex, p.fields, p.direction);
+-    if (!r.Data?.IsError) written++;
++    if (!r.IsError) written++;
+   }
+   return written;
+ };
+@@ -246,7 +246,7 @@ export const AddCustomPattern = async (
+   if (dir && dir !== "E" && dir !== "I") return "Direction must be E, I, or left blank";
+ 
+   const res = await debugUpsertPattern(s, r, fields.trim(), dir || null);
+-  if (res.Data?.IsError) return `Insert failed: ${res.Data.ErrorMessage}`;
++  if (res.IsError) return `Insert failed: ${res.ErrorMessage}`;
+ 
+   return "";
+ };
+diff --git a/features/Home/HomeProcess.ts b/features/Home/HomeProcess.ts
+index b2e3a03..b2d269f 100644
+--- a/features/Home/HomeProcess.ts
++++ b/features/Home/HomeProcess.ts
+@@ -16,7 +16,7 @@ export const GetRecords = async (filter: FilterStateParams, userId: number) => {
+     return [] as { title: string; data: RecordParams[] }[];
+   }
+ 
+-  const rows = Array.isArray(sqlData.Data.Data) ? sqlData.Data.Data : [];
++  const rows = Array.isArray(sqlData.Data) ? sqlData.Data : [];
+ 
+   // Determine grouping mode
+   const groupByMonth = filter.period === "Y";
+@@ -85,7 +85,7 @@ export const GetHomeBannerData = async (
+     return { income: 0, expense: 0, netBalance: 0 };
+   }
+ 
+-  const data = sqlData.Data.Data[0] || {};
++  const data = sqlData.Data[0] || {};
+   return {
+     income: data.TI || 0,
+     expense: data.TE || 0,
+diff --git a/features/Insights/InsightsProcess.ts b/features/Insights/InsightsProcess.ts
+index e29efda..d70687b 100644
+--- a/features/Insights/InsightsProcess.ts
++++ b/features/Insights/InsightsProcess.ts
+@@ -20,5 +20,5 @@ export async function DoesCategoryHaveChildrenHandler(
+   if (result.IsError) {
+     return false;
+   }
+-  return result.Data.Data[0].count > 0;
++  return result.Data[0].count > 0;
+ }
+diff --git a/features/Notifications/NotificationProcess.ts b/features/Notifications/NotificationProcess.ts
+index 90538ab..c776273 100644
+--- a/features/Notifications/NotificationProcess.ts
++++ b/features/Notifications/NotificationProcess.ts
+@@ -52,7 +52,7 @@ const EMPTY_TOTALS: PeriodTotals = {
+ 
+ // execute.ts nests its result and swallows IsError, so missing rows mean "no data"
+ function rows<T>(result: any): T[] {
+-  const inner = result?.Data?.Data;
++  const inner = result?.Data;
+   return Array.isArray(inner) ? (inner as T[]) : [];
+ }
+ 
+diff --git a/features/Pending/PendingProcess.ts b/features/Pending/PendingProcess.ts
+index e91f93c..73cdcfd 100644
+--- a/features/Pending/PendingProcess.ts
++++ b/features/Pending/PendingProcess.ts
+@@ -23,7 +23,7 @@ export const GetPendingRecords = async (
+ 
+   if (!sqlData || sqlData.IsError || !sqlData.Data) return [];
+ 
+-  const rows = Array.isArray(sqlData.Data.Data) ? sqlData.Data.Data : [];
++  const rows = Array.isArray(sqlData.Data) ? sqlData.Data : [];
+ 
+   return rows.map((b: any) => ({
+     isMonthlyFiltered: false,
+@@ -48,5 +48,5 @@ export const GetPendingCount = async (userId: number): Promise<number> => {
+ 
+   if (!sqlData || sqlData.IsError || !sqlData.Data) return 0;
+ 
+-  return Number(sqlData.Data.Data?.[0]?.count ?? 0);
++  return Number(sqlData.Data?.[0]?.count ?? 0);
+ };
+diff --git a/features/Profile/AboutUsProcess.ts b/features/Profile/AboutUsProcess.ts
+index 6aa1299..647ece8 100644
+--- a/features/Profile/AboutUsProcess.ts
++++ b/features/Profile/AboutUsProcess.ts
+@@ -20,7 +20,7 @@ export const handleContactEmail = async (): Promise<void> => {
+   const result = await getConfigValueContext("app_contact_email");
+   if (result.IsError) return;
+ 
+-  const email = result.Data?.Data?.[0]?.value;
++  const email = result.Data?.[0]?.value;
+ 
+   await MailComposer.composeAsync({
+     recipients: [email],
+diff --git a/features/Profile/FeedbackProcess.ts b/features/Profile/FeedbackProcess.ts
+index 7cae154..b85247b 100644
+--- a/features/Profile/FeedbackProcess.ts
++++ b/features/Profile/FeedbackProcess.ts
+@@ -15,7 +15,7 @@ export const handleContactEmail = async (): Promise<void> => {
+   const result = await getConfigValueContext("app_contact_email");
+   if (result.IsError) return;
+ 
+-  const email = result.Data?.Data?.[0]?.value;
++  const email = result.Data?.[0]?.value;
+ 
+   // Open mail composer with pre-filled recipients, subject, and body template
+   await MailComposer.composeAsync({
+diff --git a/features/Profile/HelpProcess.ts b/features/Profile/HelpProcess.ts
+index 2f1ce7e..193fc9e 100644
+--- a/features/Profile/HelpProcess.ts
++++ b/features/Profile/HelpProcess.ts
+@@ -21,7 +21,7 @@ export async function getHelpData(): Promise<HelpSection[]> {
+   const result = await getConfigValueContext("help_data");
+   if (result.IsError) return [];
+ 
+-  const raw = result.Data.Data[0]?.value;
++  const raw = result.Data[0]?.value;
+   if (!raw) return [];
+ 
+   // bad JSON in DB should not crash the screen
+diff --git a/features/model/AddCategoryProcess.ts b/features/model/AddCategoryProcess.ts
+index 09a87ed..4e9c4e2 100644
+--- a/features/model/AddCategoryProcess.ts
++++ b/features/model/AddCategoryProcess.ts
+@@ -21,13 +21,13 @@ export const GetCatRecordById = async (
+   const response = await getCatById(id, userId);
+ 
+   // if you got proper data then arrange data as per GUI need
+-  if (!response.IsError && response.Data.Data.length > 0) {
++  if (!response.IsError && response.Data.length > 0) {
+     const data = {
+-      id: response.Data.Data[0].id,
+-      name: response.Data.Data[0].name,
+-      typeofcategory: response.Data.Data[0].typeofcategory,
+-      icon: response.Data.Data[0].icon,
+-      parentid: response.Data.Data[0].parentid,
++      id: response.Data[0].id,
++      name: response.Data[0].name,
++      typeofcategory: response.Data[0].typeofcategory,
++      icon: response.Data[0].icon,
++      parentid: response.Data[0].parentid,
+     };
+     response.Data = data;
+     //////console.log(response.Data);
+@@ -38,9 +38,9 @@ export const GetCatRecordById = async (
+     }
+ 
+     const parentCat = await getCatById(response.Data.parentid, userId);
+-    if (!parentCat.IsError && parentCat.Data.Data.length > 0) {
+-      response.Data.parentCatName = parentCat.Data.Data[0].name;
+-      response.Data.parentCatIcon = parentCat.Data.Data[0].icon;
++    if (!parentCat.IsError && parentCat.Data.length > 0) {
++      response.Data.parentCatName = parentCat.Data[0].name;
++      response.Data.parentCatIcon = parentCat.Data[0].icon;
+     }
+   }
+ 
+diff --git a/features/model/AddRecordProcess.ts b/features/model/AddRecordProcess.ts
+index c9044eb..d14f3ae 100644
+--- a/features/model/AddRecordProcess.ts
++++ b/features/model/AddRecordProcess.ts
+@@ -41,20 +41,20 @@ export const GetBillRecordById = async (
+   const response = await getBillById(id);
+ 
+   // if you got proper data then arrange data as per GUI need
+-  if (!response.IsError && response.Data.Data.length > 0) {
++  if (!response.IsError && response.Data.length > 0) {
+     const data = {
+-      id: response.Data.Data[0].id,
+-      amount: response.Data.Data[0].amount,
+-      catId: response.Data.Data[0].toaccid,
+-      date: response.Data.Data[0].date,
+-      typeofbill: response.Data.Data[0].typeofbill,
+-      title: response.Data.Data[0].title,
+-      description: response.Data.Data[0].description,
+-      docurl: response.Data.Data[0].docurl
+-        ? response.Data.Data[0].docurl.split(",")
++      id: response.Data[0].id,
++      amount: response.Data[0].amount,
++      catId: response.Data[0].toaccid,
++      date: response.Data[0].date,
++      typeofbill: response.Data[0].typeofbill,
++      title: response.Data[0].title,
++      description: response.Data[0].description,
++      docurl: response.Data[0].docurl
++        ? response.Data[0].docurl.split(",")
+         : [],
+-      categoryName: response.Data.Data[0].categoryName,
+-      categoryIcon: response.Data.Data[0].image,
++      categoryName: response.Data[0].categoryName,
++      categoryIcon: response.Data[0].image,
+     };
+     response.Data = data;
+     return response;
+diff --git a/features/model/RateAppProcess.ts b/features/model/RateAppProcess.ts
+index 004b54d..649d225 100644
+--- a/features/model/RateAppProcess.ts
++++ b/features/model/RateAppProcess.ts
+@@ -8,7 +8,7 @@ export const rateApp = async () => {
+ 
+     if (result.IsError) return;
+ 
+-    await Linking.openURL(result.Data.Data[0].value);
++    await Linking.openURL(result.Data[0].value);
+   }
+ };
+ 
+@@ -19,6 +19,6 @@ export const shareApp = async () => {
+   if (result.IsError) return;
+ 
+   await Share.share({
+-    message: `CoinNote - Ultimate Money Management App 🚀\n\nDownload now 👇\n${result.Data.Data[0].value}`,
++    message: `CoinNote - Ultimate Money Management App 🚀\n\nDownload now 👇\n${result.Data[0].value}`,
+   });
+ };
+diff --git a/features/model/ViewCategoryWiseRecrodProcess.ts b/features/model/ViewCategoryWiseRecrodProcess.ts
+index f987ebc..9f5efb9 100644
+--- a/features/model/ViewCategoryWiseRecrodProcess.ts
++++ b/features/model/ViewCategoryWiseRecrodProcess.ts
+@@ -42,7 +42,7 @@ export const GetRecordsCatWise = async (
+   // get record for current and all child
+   const childCatIdsRes = await GetAllChildCatIds(id);
+   let childIds: number[] = [];
+-  childCatIdsRes.Data?.Data?.map((item: { ids: number }) =>
++  childCatIdsRes.Data?.map((item: { ids: number }) =>
+     childIds.push(item.ids),
+   );
+   //////console.log("-------------------------------- child cat ids: ----- ", childIds);
+@@ -58,7 +58,7 @@ export const GetRecordsCatWise = async (
+     return [] as { title: string; data: RecordParams[] }[];
+   }
+ 
+-  const rows = Array.isArray(sqlData.Data.Data) ? sqlData.Data.Data : [];
++  const rows = Array.isArray(sqlData.Data) ? sqlData.Data : [];
+ 
+   // Determine grouping mode
+   const groupByMonth = dummyFilterState.period === "Y";
+@@ -126,13 +126,13 @@ export const GetCatRecordById = async (
+   const response = await getCatById(id, userId);
+ 
+   // if you got proper data then arrange data as per GUI need
+-  if (!response.IsError && response.Data?.Data?.length > 0) {
++  if (!response.IsError && response.Data?.length > 0) {
+     const data = {
+-      id: response.Data.Data[0].id,
+-      name: response.Data.Data[0].name,
+-      typeofcategory: response.Data.Data[0].typeofcategory,
+-      icon: response.Data.Data[0].icon,
+-      parentid: response.Data.Data[0].parentid,
++      id: response.Data[0].id,
++      name: response.Data[0].name,
++      typeofcategory: response.Data[0].typeofcategory,
++      icon: response.Data[0].icon,
++      parentid: response.Data[0].parentid,
+     };
+     response.Data = data;
+   }
+@@ -140,7 +140,7 @@ export const GetCatRecordById = async (
+   // get total expense for category and its child category
+   const childCatIdsRes = await GetAllChildCatIds(id);
+   let childIds: number[] = [];
+-  childCatIdsRes.Data?.Data?.map((item: { ids: number }) =>
++  childCatIdsRes.Data?.map((item: { ids: number }) =>
+     childIds.push(item.ids),
+   );
+   const totalExpenseRes = await GetTotalBillByCatIds(
+@@ -150,7 +150,7 @@ export const GetCatRecordById = async (
+ 
+   //////console.log("------------- ttttttt ------");
+   //////console.log(totalExpenseRes.Data);
+-  response.Data.totalExpense = totalExpenseRes.Data?.Data[0].total || 0;
++  response.Data.totalExpense = totalExpenseRes.Data[0].total || 0;
+ 
+   return response;
+ };
+diff --git a/hooks/useAuth.ts b/hooks/useAuth.ts
+index 007fa2a..01414cd 100644
+--- a/hooks/useAuth.ts
++++ b/hooks/useAuth.ts
+@@ -146,10 +146,10 @@ export function useAuth() {
+     if (Number(newLMV) > 0) {
+       const userId = parseInt((await AsyncStorage.getItem("userId")) || "0");
+       const UserData = await GetUserById(userId);
+-      if (UserData && UserData.Data.Data.length > 0 && !UserData.IsError) {
++      if (UserData && UserData.Data.length > 0 && !UserData.IsError) {
+         const userStatePayload = {
+           userId: userId,
+-          name: UserData.Data.Data[0].name,
++          name: UserData.Data[0].name,
+         };
+         dispatch(setUser(userStatePayload));
+       } else {
+@@ -165,7 +165,7 @@ export function useAuth() {
+ 
+     // set currency
+     const currencyValue = await getConfigValueContext("currency");
+-    dispatch(changeCurrency(currencyValue?.Data?.Data?.[0]?.value || "INR"));
++    dispatch(changeCurrency(currencyValue?.Data?.[0]?.value || "INR"));
+   };
+ 
+   // --- get pre configurations like onboarding status which are not dependent on user login -----------
+diff --git a/util/utilFunctions.ts b/util/utilFunctions.ts
+index d15e3e5..8d3410c 100644
+--- a/util/utilFunctions.ts
++++ b/util/utilFunctions.ts
+@@ -99,7 +99,7 @@ export async function CheckAndRunMigration() {
+   if (lastMigratedVersion !== null && Number(lastMigratedVersion) >= 0) {
+     // this flag determines whether it is first time user login on this device then
+     // we have to fire default quries too.
+-    const IsFirstTimeLogin = GetUserById(Number(userId)).Data.Data.length === 0;
++    const IsFirstTimeLogin = GetUserById(Number(userId)).Data.length === 0;
+ 
+     // get migration data with current gui version set (temporory set to 1) and current db version
+     resData = await GetMigrationData({

@@ -1,0 +1,74 @@
+diff --git a/prisma/manual/20261018_sync_checks.sql b/prisma/manual/20261018_sync_checks.sql
+index 88c5909..d11b5a6 100644
+--- a/prisma/manual/20261018_sync_checks.sql
++++ b/prisma/manual/20261018_sync_checks.sql
+@@ -30,8 +30,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS budget_period_key
+ ALTER TABLE change_log DROP CONSTRAINT IF EXISTS change_log_entity_check;
+ ALTER TABLE change_log ADD CONSTRAINT change_log_entity_check CHECK (entity IN ('category', 'bill', 'budget'));
+ ALTER TABLE change_log DROP CONSTRAINT IF EXISTS change_log_op_check;
+-ALTER TABLE change_log ADD CONSTRAINT change_log_op_check CHECK (op IN ('upsert', 'delete'));
+-
+--- users
+-ALTER TABLE users DROP CONSTRAINT IF EXISTS users_cloud_state_check;
+-ALTER TABLE users ADD CONSTRAINT users_cloud_state_check CHECK (cloud_state IN ('none', 'imported', 'seeded'));
++ALTER TABLE change_log ADD CONSTRAINT change_log_op_check CHECK (op IN ('INSERT', 'UPDATE', 'DELETE'));
+diff --git a/scripts/testSyncSchema.ts b/scripts/testSyncSchema.ts
+index 92f8466..a989353 100644
+--- a/scripts/testSyncSchema.ts
++++ b/scripts/testSyncSchema.ts
+@@ -1,6 +1,6 @@
+ /// <reference types="node" />
+ /**
+- * Sync schema tests (Phase 1.4)
++ * Sync schema tests (Phase 1.4, updated in 2.R step 2)
+  * -----------------------------
+  * Checks the DB rules from prisma/schema.prisma + prisma/manual/20261018_sync_checks.sql.
+  * Everything runs inside ONE transaction that is always rolled back, so no data is left behind.
+@@ -14,25 +14,32 @@ import prisma from "../src/config/prisma.config.js";
+ const U1 = 900000001; // test users, high ids so they never clash with real users
+ const U2 = 900000002;
+ const CAT = "01900000-0000-7000-8000-000000000001";
++const OP1 = "01900000-0000-7000-8000-0000000000e1"; // op_ids for change_log cases
++const OP2 = "01900000-0000-7000-8000-0000000000e2";
++const OP3 = "01900000-0000-7000-8000-0000000000e3";
+ 
+ // [name, sql, shouldSucceed]
+ const CASES: [string, string, boolean][] = [
+     ["insert test users", `INSERT INTO users (id,name,password,mobilenumber,email) VALUES (${U1},'T1','x','t1','t1@test'),(${U2},'T2','x','t2','t2@test')`, true],
+-    ["valid category", `INSERT INTO category (user_id,id,name,type,updated_seq) VALUES (${U1},'${CAT}','Food','E',1)`, true],
+-    ["category bad type", `INSERT INTO category (user_id,id,name,type,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-000000000002','X','Q',2)`, false],
+-    ["same uuid for another user", `INSERT INTO category (user_id,id,name,type,updated_seq) VALUES (${U2},'${CAT}','Food','E',1)`, true],
+-    ["duplicate uuid same user", `INSERT INTO category (user_id,id,name,type,updated_seq) VALUES (${U1},'${CAT}','Dup','E',3)`, false],
+-    ["valid bill", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000b1','${CAT}',45050,'E','2026-10-18 10:30:00','Tea',4)`, true],
+-    ["bill zero amount", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000b2','${CAT}',0,'E','2026-10-18 10:30:00','Zero',5)`, false],
+-    ["bill bad type", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000b3','${CAT}',100,'X','2026-10-18 10:30:00','Bad',6)`, false],
+-    ["valid monthly budget", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d1','${CAT}',2026,10,'M',500000,7)`, true],
+-    ["duplicate budget period", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d2','${CAT}',2026,10,'M',100,8)`, false],
+-    ["monthly budget without month", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d3','${CAT}',2026,NULL,'M',100,9)`, false],
+-    ["valid yearly budget", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d4','${CAT}',2026,NULL,'Y',100,10)`, true],
+-    ["yearly budget with month", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise,updated_seq) VALUES (${U1},'01900000-0000-7000-8000-0000000000d5','${CAT}',2027,5,'Y',100,11)`, false],
+-    ["valid change_log", `INSERT INTO change_log (user_id,seq,entity,row_id,op) VALUES (${U1},1,'bill','01900000-0000-7000-8000-0000000000b1','delete')`, true],
+-    ["change_log bad op", `INSERT INTO change_log (user_id,seq,entity,row_id,op) VALUES (${U1},2,'bill','01900000-0000-7000-8000-0000000000b1','edit')`, false],
+-    ["bad cloud_state", `UPDATE users SET cloud_state='weird' WHERE id=${U1}`, false],
++    ["valid category", `INSERT INTO category (user_id,id,name,type) VALUES (${U1},'${CAT}','Food','E')`, true],
++    ["category bad type", `INSERT INTO category (user_id,id,name,type) VALUES (${U1},'01900000-0000-7000-8000-000000000002','X','Q')`, false],
++    ["same uuid for another user", `INSERT INTO category (user_id,id,name,type) VALUES (${U2},'${CAT}','Food','E')`, true],
++    ["duplicate uuid same user", `INSERT INTO category (user_id,id,name,type) VALUES (${U1},'${CAT}','Dup','E')`, false],
++    ["valid bill", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title) VALUES (${U1},'01900000-0000-7000-8000-0000000000b1','${CAT}',45050,'E','2026-10-18 10:30:00','Tea')`, true],
++    ["bill zero amount", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title) VALUES (${U1},'01900000-0000-7000-8000-0000000000b2','${CAT}',0,'E','2026-10-18 10:30:00','Zero')`, false],
++    ["bill bad type", `INSERT INTO bill (user_id,id,category_id,amount_paise,type,date,title) VALUES (${U1},'01900000-0000-7000-8000-0000000000b3','${CAT}',100,'X','2026-10-18 10:30:00','Bad')`, false],
++    ["valid monthly budget", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise) VALUES (${U1},'01900000-0000-7000-8000-0000000000d1','${CAT}',2026,10,'M',500000)`, true],
++    ["duplicate budget period", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise) VALUES (${U1},'01900000-0000-7000-8000-0000000000d2','${CAT}',2026,10,'M',100)`, false],
++    ["monthly budget without month", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise) VALUES (${U1},'01900000-0000-7000-8000-0000000000d3','${CAT}',2026,NULL,'M',100)`, false],
++    ["valid yearly budget", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise) VALUES (${U1},'01900000-0000-7000-8000-0000000000d4','${CAT}',2026,NULL,'Y',100)`, true],
++    ["yearly budget with month", `INSERT INTO budget (user_id,id,category_id,year,month,type,limit_paise) VALUES (${U1},'01900000-0000-7000-8000-0000000000d5','${CAT}',2027,5,'Y',100)`, false],
++    ["change_log valid INSERT", `INSERT INTO change_log (user_id,seq,entity,row_id,op,op_id) VALUES (${U1},1,'bill','01900000-0000-7000-8000-0000000000b1','INSERT','${OP1}')`, true],
++    ["change_log valid DELETE", `INSERT INTO change_log (user_id,seq,entity,row_id,op,op_id) VALUES (${U1},2,'bill','01900000-0000-7000-8000-0000000000b1','DELETE','${OP2}')`, true],
++    ["change_log old op 'upsert'", `INSERT INTO change_log (user_id,seq,entity,row_id,op,op_id) VALUES (${U1},3,'bill','01900000-0000-7000-8000-0000000000b1','upsert','${OP3}')`, false],
++    ["change_log bad op", `INSERT INTO change_log (user_id,seq,entity,row_id,op,op_id) VALUES (${U1},4,'bill','01900000-0000-7000-8000-0000000000b1','edit','${OP3}')`, false],
++    ["change_log missing op_id", `INSERT INTO change_log (user_id,seq,entity,row_id,op) VALUES (${U1},5,'bill','01900000-0000-7000-8000-0000000000b1','UPDATE')`, false],
++    ["change_log same op_id twice, same user", `INSERT INTO change_log (user_id,seq,entity,row_id,op,op_id) VALUES (${U1},6,'bill','01900000-0000-7000-8000-0000000000b1','UPDATE','${OP1}')`, false],
++    ["change_log same op_id, other user", `INSERT INTO change_log (user_id,seq,entity,row_id,op,op_id) VALUES (${U2},1,'bill','01900000-0000-7000-8000-0000000000b1','INSERT','${OP1}')`, true],
+ ];
+ 
+ const ROLLBACK = new Error("rollback test data");

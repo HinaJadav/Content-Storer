@@ -1,0 +1,43 @@
+diff --git a/prisma/manual/20261018_sync_checks.sql b/prisma/manual/20261018_sync_checks.sql
+new file mode 100644
+index 0000000..88c5909
+--- /dev/null
++++ b/prisma/manual/20261018_sync_checks.sql
+@@ -0,0 +1,37 @@
++-- Sync tables: rules Prisma schema cannot express (CHECKs + expression unique index).
++-- Safe to run again: each constraint is dropped first, index uses IF NOT EXISTS.
++-- Run after `prisma db push`:
++--   npx prisma db execute --file prisma/manual/20261018_sync_checks.sql --schema prisma/schema.prisma
++
++-- category
++ALTER TABLE category DROP CONSTRAINT IF EXISTS category_type_check;
++ALTER TABLE category ADD CONSTRAINT category_type_check CHECK (type IN ('I', 'E'));
++
++-- bill
++ALTER TABLE bill DROP CONSTRAINT IF EXISTS bill_type_check;
++ALTER TABLE bill ADD CONSTRAINT bill_type_check CHECK (type IN ('I', 'E', 'T'));
++ALTER TABLE bill DROP CONSTRAINT IF EXISTS bill_amount_check;
++ALTER TABLE bill ADD CONSTRAINT bill_amount_check CHECK (amount_paise > 0);
++
++-- budget: monthly budget needs month 1-12, yearly budget has no month
++ALTER TABLE budget DROP CONSTRAINT IF EXISTS budget_type_check;
++ALTER TABLE budget ADD CONSTRAINT budget_type_check CHECK (type IN ('M', 'Y'));
++ALTER TABLE budget DROP CONSTRAINT IF EXISTS budget_month_check;
++ALTER TABLE budget ADD CONSTRAINT budget_month_check
++    CHECK ((type = 'M' AND month IS NOT NULL AND month BETWEEN 1 AND 12) OR (type = 'Y' AND month IS NULL));
++ALTER TABLE budget DROP CONSTRAINT IF EXISTS budget_limit_check;
++ALTER TABLE budget ADD CONSTRAINT budget_limit_check CHECK (limit_paise >= 0);
++
++-- one budget per user + category + period (two offline phones creating the same budget)
++CREATE UNIQUE INDEX IF NOT EXISTS budget_period_key
++    ON budget (user_id, category_id, year, COALESCE(month, 0), type);
++
++-- change_log
++ALTER TABLE change_log DROP CONSTRAINT IF EXISTS change_log_entity_check;
++ALTER TABLE change_log ADD CONSTRAINT change_log_entity_check CHECK (entity IN ('category', 'bill', 'budget'));
++ALTER TABLE change_log DROP CONSTRAINT IF EXISTS change_log_op_check;
++ALTER TABLE change_log ADD CONSTRAINT change_log_op_check CHECK (op IN ('upsert', 'delete'));
++
++-- users
++ALTER TABLE users DROP CONSTRAINT IF EXISTS users_cloud_state_check;
++ALTER TABLE users ADD CONSTRAINT users_cloud_state_check CHECK (cloud_state IN ('none', 'imported', 'seeded'));

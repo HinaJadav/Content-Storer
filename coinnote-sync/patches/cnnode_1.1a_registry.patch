@@ -1,0 +1,83 @@
+diff --git a/src/contract/registry.ts b/src/contract/registry.ts
+new file mode 100644
+index 0000000..a037ec9
+--- /dev/null
++++ b/src/contract/registry.ts
+@@ -0,0 +1,77 @@
++/**
++ * Sync Registry
++ * -------------
++ * Single source of truth for WHAT syncs between phone and server.
++ * Every synced table, its wire columns, their type and limits are listed here.
++ * Push/pull validation and SQL are built from this file, never by hand.
++ *
++ * Rules:
++ * - Only columns listed here travel on the wire.
++ * - user_id is NEVER on the wire: server takes it from the access token.
++ * - Server-only columns (user_id, updated_seq, last_op_id, created_at, updated_at)
++ *   and device-only columns (server_seq, dirty, billstatus, smssender, deduphash)
++ *   are intentionally not listed.
++ * - Deletes are an operation ("delete"), not a column. The row is removed and the
++ *   server keeps only a note in change_log (decision D3).
++ */
++
++// kinds of values a column can hold on the wire
++export type ColumnKind =
++    | "uuid"           // lowercase uuid string, 36 chars
++    | "text"           // string, limited by max
++    | "enum"           // one of allowed values
++    | "int"            // whole number, limited by min/max
++    | "money"          // whole paise (integer), decision D4
++    | "localDateTime"; // "YYYY-MM-DD HH:MM:SS", phone local time, no timezone
++
++export interface ColumnDef {
++    kind: ColumnKind;
++    nullable: boolean;
++    max?: number;          // text: max length, int/money: max value
++    min?: number;          // int/money: min value
++    values?: string[];     // enum: allowed values
++}
++
++export interface EntityDef {
++    rank: number;          // sync order: lower rank is pushed/pulled first
++    columns: Record<string, ColumnDef>;
++}
++
++export const SYNC_REGISTRY: Record<string, EntityDef> = {
++    category: {
++        rank: 1, // parents must exist before bills/budgets point to them
++        columns: {
++            id:        { kind: "uuid", nullable: false },
++            name:      { kind: "text", nullable: false, max: 100 },
++            type:      { kind: "enum", nullable: false, values: ["I", "E"] },
++            parent_id: { kind: "uuid", nullable: true },
++            icon:      { kind: "text", nullable: true, max: 255 },
++        },
++    },
++    budget: {
++        rank: 2,
++        columns: {
++            id:          { kind: "uuid", nullable: false },
++            category_id: { kind: "uuid", nullable: false },
++            year:        { kind: "int", nullable: false, min: 2000, max: 2100 },
++            month:       { kind: "int", nullable: true, min: 1, max: 12 }, // null = yearly budget
++            type:        { kind: "enum", nullable: false, values: ["M", "Y"] },
++            limit_paise: { kind: "money", nullable: false, min: 0, max: 10_000_000_000_000 },
++        },
++    },
++    bill: {
++        rank: 2,
++        columns: {
++            id:           { kind: "uuid", nullable: false },
++            category_id:  { kind: "uuid", nullable: false }, // was toaccid
++            amount_paise: { kind: "money", nullable: false, min: 1, max: 10_000_000_000_000 },
++            type:         { kind: "enum", nullable: false, values: ["I", "E", "T"] },
++            date:         { kind: "localDateTime", nullable: false },
++            title:        { kind: "text", nullable: false, max: 150 },
++            description:  { kind: "text", nullable: true, max: 1000 },
++        },
++    },
++};
++
++// names of all synced entities, e.g. ["category", "budget", "bill"]
++export const SYNC_ENTITIES = Object.keys(SYNC_REGISTRY);

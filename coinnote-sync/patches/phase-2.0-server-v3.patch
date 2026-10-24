@@ -1,0 +1,458 @@
+diff --git a/src/controllers/dbversion.controller.ts b/src/controllers/dbversion.controller.ts
+index df01440..321c790 100644
+--- a/src/controllers/dbversion.controller.ts
++++ b/src/controllers/dbversion.controller.ts
+@@ -54,6 +54,7 @@ export const dbVersionController = {
+         const currentVersion = Number(req.body.currentVersion);
+         const IsFirstTimeLogin = req.body.IsFirstTimeLogin;
+         const GUIVersion = req.body.GUIVersion;
++        const versionCode = req.body.versionCode; // Play Store version code, old builds don't send it
+ 
+         // identify caller from access token (if sent)
+         // valid token   -> userid taken from token, real profile can be sent
+@@ -101,7 +102,7 @@ export const dbVersionController = {
+         }
+ 
+         // 3) Delegate version comparison and script generation to service layer
+-        const result = await dbVersionService.checkForUpdates(currentVersion, GUIVersion, userId, IsFirstTimeLogin, includeProfile);
++        const result = await dbVersionService.checkForUpdates(currentVersion, GUIVersion, userId, IsFirstTimeLogin, includeProfile, versionCode);
+ 
+         // 4) Return service response as-is
+         return res.json(result);
+diff --git a/src/repositories/dbversion.repository.ts b/src/repositories/dbversion.repository.ts
+index c167d0f..19e9d86 100644
+--- a/src/repositories/dbversion.repository.ts
++++ b/src/repositories/dbversion.repository.ts
+@@ -51,7 +51,7 @@ export const dbVersionRepository = {
+      * @returns ordered list of migration records
+      * @throws Error if DB query fails
+      */
+-    async getMigrationsAfter(version: number): Promise<{ id: number; query: string }[]> {
++    async getMigrationsAfter(version: number): Promise<{ id: number; query: string; guiversion: string }[]> {
+         try {
+             return await prisma.dbversions.findMany({
+                 where: { id: { gt: version } },
+diff --git a/src/servies/appConfig.service.ts b/src/servies/appConfig.service.ts
+index fadcde6..a3134e8 100644
+--- a/src/servies/appConfig.service.ts
++++ b/src/servies/appConfig.service.ts
+@@ -5,6 +5,9 @@ import { response } from "../utils/response.js";
+ /** config table key holding the lowest Android version code that is still allowed without a forced update */
+ const MIN_SUPPORTED_VERSION_CODE_KEY = "min_supported_version_code";
+ 
++/** config table key holding the lowest Android version code whose app has the new (UUID) local schema */
++const NEW_SCHEMA_MIN_VERSION_CODE_KEY = "new_schema_min_version_code";
++
+ /**
+  * Service for in-app update settings sent to the mobile app.
+  */
+@@ -41,4 +44,25 @@ export const appConfigService = {
+       );
+     }
+   },
++
++  /**
++   * Returns the lowest version code whose app has the new (UUID) local schema.
++   * Those builds create default categories themselves.
++   * Missing, invalid or failing read -> null, i.e. no build counts as new-schema.
++   *
++   * @returns version code or null
++   */
++  async getNewSchemaMinVersionCode(): Promise<number | null> {
++    try {
++      const rawValue = await appConfigRepository.getValue(
++        NEW_SCHEMA_MIN_VERSION_CODE_KEY,
++      );
++
++      const parsed = Number.parseInt(rawValue ?? "", 10);
++      return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
++    } catch (error) {
++      console.error("AppConfigService.getNewSchemaMinVersionCode failed:", error);
++      return null;
++    }
++  },
+ };
+diff --git a/src/servies/buildGate.service.ts b/src/servies/buildGate.service.ts
+new file mode 100644
+index 0000000..afc6dbe
+--- /dev/null
++++ b/src/servies/buildGate.service.ts
+@@ -0,0 +1,75 @@
++/**
++ * Build gate
++ * ----------
++ * Decides what an app build may receive, by its Play Store version code.
++ * Pure logic: no DB access, no config reads (callers pass the values in).
++ */
++
++export interface MigrationRow {
++  id: number;
++  query: string;
++  guiversion: string | null;
++}
++
++export const buildGateService = {
++  /**
++   * Version code sent by the app.
++   * Missing / invalid -> 0 (old builds don't send it, they count as old build).
++   */
++  toVersionCode(value: unknown): number {
++    const parsed = Number(value);
++    return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
++  },
++
++  /**
++   * dbversions.guiversion = minimum version code that may run this row.
++   * Not a whole number (old rows like "1.0.0" or "") -> 0, row goes to every build.
++   */
++  rowMinVersionCode(guiversion: string | null | undefined): number {
++    const parsed = Number(guiversion);
++    return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
++  },
++
++  /**
++   * Keeps rows in order and stops at the first row this build may not run.
++   * The build reports only up to the last row sent, so after an app update
++   * the held-back rows are sent next time (never skipped).
++   *
++   * @returns allowed rows + toVersion (version the build reaches after running them)
++   */
++  filterMigrations(
++    rows: MigrationRow[],
++    versionCode: number,
++    currentVersion: number,
++    latestVersion: number,
++  ): { allowed: MigrationRow[]; toVersion: number } {
++    const allowed: MigrationRow[] = [];
++    let heldBack = false;
++
++    for (const row of rows) {
++      if (versionCode < buildGateService.rowMinVersionCode(row.guiversion)) {
++        heldBack = true;
++        break;
++      }
++      allowed.push(row);
++    }
++
++    let toVersion = latestVersion;
++    if (heldBack) {
++      toVersion = currentVersion;
++      if (allowed.length > 0) {
++        toVersion = allowed[allowed.length - 1].id;
++      }
++    }
++
++    return { allowed: allowed, toVersion: toVersion };
++  },
++
++  /**
++   * true when this build has the new (UUID) local schema and creates default
++   * categories itself. No limit configured (null) -> false for every build.
++   */
++  isNewSchemaBuild(versionCode: number, newSchemaMinVersionCode: number | null): boolean {
++    return newSchemaMinVersionCode !== null && versionCode >= newSchemaMinVersionCode;
++  },
++};
+diff --git a/src/servies/dbversion.service.ts b/src/servies/dbversion.service.ts
+index df3fd99..572e413 100644
+--- a/src/servies/dbversion.service.ts
++++ b/src/servies/dbversion.service.ts
+@@ -1,5 +1,7 @@
+ import { dbVersionRepository } from "../repositories/dbversion.repository.js";
+ import { defaultQueryRepository } from "../repositories/defaultQuery.repository.js";
++import { appConfigService } from "./appConfig.service.js";
++import { buildGateService } from "./buildGate.service.js";
+ import { apiResponse } from "../types/apiResponse.js";
+ import { response } from "../utils/response.js";
+ import { signPayload } from "../utils/signatureGenerator.js";
+@@ -29,6 +31,7 @@ export const dbVersionService = {
+    * @param currentVersion - DB version currently present on client (mobile)
+    * @param includeProfile - true only when caller is verified by access token.
+    *                         false -> placeholder user row, no personal data
++   * @param versionCode - Play Store version code of the app (old builds don't send it)
+    * @returns apiResponse with migration info and SQL script
+    */
+   async checkForUpdates(
+@@ -37,6 +40,7 @@ export const dbVersionService = {
+     userId: number,
+     IsFirstTimeLogin: boolean,
+     includeProfile: boolean,
++    versionCode: number,
+   ): Promise<apiResponse<any>> {
+     try {
+       // 1) Validate input
+@@ -62,7 +66,7 @@ export const dbVersionService = {
+       //         {
+       //             hasUpdates: false,
+       //             fromVersion: currentVersion,
+-      //             toVersion: latestVersion,
++      //             toVersion: toVersion,
+       //             guiVersion: guiVersion,
+       //             script: ""
+       //         },
+@@ -76,20 +80,27 @@ export const dbVersionService = {
+       const migrations =
+         await dbVersionRepository.getMigrationsAfter(currentVersion);
+ 
++      // keep only the rows this build may run (by Play Store version code)
++      const appVersionCode = buildGateService.toVersionCode(versionCode);
++      const gate = buildGateService.filterMigrations(migrations, appVersionCode, currentVersion, latestVersion);
++      const toVersion = gate.toVersion;
++
+       // 5) Build SQL script (ordered, incremental)
+-      let script = migrations
++      let script = gate.allowed
+         .map((m: { id: number; query: string }) => `${m.query}`)
+         .join("");
+ 
+       // if current version is less then latest version then we need to
+       // clear the guidbversion table and insert the latest version into it
+       // NOTE: SQLite (device) has no TRUNCATE, so DELETE FROM is used
+-      if (currentVersion < latestVersion) {
+-        script += `DELETE FROM guidbversion;INSERT INTO guidbversion ("dbId") VALUES (${latestVersion});`;
++      if (currentVersion < toVersion) {
++        script += `DELETE FROM guidbversion;INSERT INTO guidbversion ("dbId") VALUES (${toVersion});`;
+       }
+ 
+       // attach default queries to script as well, as they are required to be run on every login for each user (first time on each device)
+-      if (IsFirstTimeLogin) {
++      // new-schema builds create default categories in the app, so they get none
++      const newSchemaMinVersionCode = await appConfigService.getNewSchemaMinVersionCode();
++      if (IsFirstTimeLogin && !buildGateService.isNewSchemaBuild(appVersionCode, newSchemaMinVersionCode)) {
+         const defaultQueries =
+           await defaultQueryRepository.getAllDefaultQueries();
+         script += defaultQueries
+@@ -140,7 +151,7 @@ export const dbVersionService = {
+       const payload = {
+         hasUpdates: scriptArray.length > 0,
+         fromVersion: currentVersion,
+-        toVersion: latestVersion,
++        toVersion: toVersion,
+         script: scriptArray,
+       };
+ 
+diff --git a/tests/buildGate.test.ts b/tests/buildGate.test.ts
+new file mode 100644
+index 0000000..9bb7f2d
+--- /dev/null
++++ b/tests/buildGate.test.ts
+@@ -0,0 +1,87 @@
++import { describe, it, expect } from "vitest";
++import { buildGateService } from "../src/servies/buildGate.service.js";
++
++/**
++ * 2.0 — build gate: what an app build may receive, by its Play Store version code.
++ * Pure logic, no mocks.
++ */
++
++const OLD_ROWS = [
++    { id: 1, query: "CREATE TABLE a(x);", guiversion: "1.0.0" },
++    { id: 2, query: "ALTER TABLE a ADD y;", guiversion: "" },
++];
++const NEW_ROW = { id: 3, query: "CREATE TABLE b(x);", guiversion: "35" };
++const LATER_ROW = { id: 4, query: "CREATE TABLE c(x);", guiversion: "" };
++
++describe("toVersionCode", () => {
++    it("keeps a valid version code", () => {
++        expect(buildGateService.toVersionCode(35)).toBe(35);
++        expect(buildGateService.toVersionCode("35")).toBe(35);
++    });
++
++    it("missing / invalid -> 0 (old build)", () => {
++        for (const bad of [undefined, null, "", "abc", -1, 1.5, Number.NaN]) {
++            expect(buildGateService.toVersionCode(bad)).toBe(0);
++        }
++    });
++});
++
++describe("rowMinVersionCode", () => {
++    it("whole number guiversion is the minimum version code", () => {
++        expect(buildGateService.rowMinVersionCode("35")).toBe(35);
++    });
++
++    it("non-number guiversion -> 0 (every build)", () => {
++        for (const value of ["1.0.0", "", "abc", null, undefined, "0", "-3"]) {
++            expect(buildGateService.rowMinVersionCode(value)).toBe(0);
++        }
++    });
++});
++
++describe("filterMigrations", () => {
++    it("every row allowed -> toVersion = latest", () => {
++        const gate = buildGateService.filterMigrations(OLD_ROWS, 1, 0, 2);
++        expect(gate.allowed.map((r) => r.id)).toEqual([1, 2]);
++        expect(gate.toVersion).toBe(2);
++    });
++
++    it("old build stops at the first row it may not run, later rows held back too", () => {
++        const gate = buildGateService.filterMigrations([...OLD_ROWS, NEW_ROW, LATER_ROW], 34, 0, 4);
++        expect(gate.allowed.map((r) => r.id)).toEqual([1, 2]);
++        expect(gate.toVersion).toBe(2);
++    });
++
++    it("new build gets every row", () => {
++        const gate = buildGateService.filterMigrations([...OLD_ROWS, NEW_ROW, LATER_ROW], 35, 0, 4);
++        expect(gate.allowed.map((r) => r.id)).toEqual([1, 2, 3, 4]);
++        expect(gate.toVersion).toBe(4);
++    });
++
++    it("first pending row held back -> nothing allowed, toVersion = current", () => {
++        const gate = buildGateService.filterMigrations([NEW_ROW], 34, 2, 3);
++        expect(gate.allowed).toEqual([]);
++        expect(gate.toVersion).toBe(2);
++    });
++
++    it("no pending rows -> toVersion = latest (same as before)", () => {
++        const gate = buildGateService.filterMigrations([], 34, 5, 5);
++        expect(gate.allowed).toEqual([]);
++        expect(gate.toVersion).toBe(5);
++    });
++});
++
++describe("isNewSchemaBuild", () => {
++    it("version code at or above the limit -> true", () => {
++        expect(buildGateService.isNewSchemaBuild(35, 35)).toBe(true);
++        expect(buildGateService.isNewSchemaBuild(40, 35)).toBe(true);
++    });
++
++    it("below the limit -> false", () => {
++        expect(buildGateService.isNewSchemaBuild(34, 35)).toBe(false);
++        expect(buildGateService.isNewSchemaBuild(0, 35)).toBe(false);
++    });
++
++    it("no limit configured (null) -> false for every build", () => {
++        expect(buildGateService.isNewSchemaBuild(99, null)).toBe(false);
++    });
++});
+diff --git a/tests/dbversion.service.test.ts b/tests/dbversion.service.test.ts
+new file mode 100644
+index 0000000..9bf3a2a
+--- /dev/null
++++ b/tests/dbversion.service.test.ts
+@@ -0,0 +1,79 @@
++import { describe, it, expect, vi, beforeEach } from "vitest";
++
++/**
++ * 2.0 — dbversion.service uses the build gate (only the new wiring is tested here;
++ * the version rules themselves are in buildGate.test.ts).
++ */
++
++const migrationsAfter = vi.fn();
++const newSchemaLimit = vi.fn();
++
++vi.mock("../src/repositories/dbversion.repository.js", () => ({
++    dbVersionRepository: {
++        findByUserId: async () => ({ id: 7, name: "Asha", email: "a@x.com", mobilenumber: "99", age: 30 }),
++        getLatestVersion: async () => 3,
++        getMigrationsAfter: (v: number) => migrationsAfter(v),
++    },
++}));
++vi.mock("../src/repositories/defaultQuery.repository.js", () => ({
++    defaultQueryRepository: { getAllDefaultQueries: async () => [{ query: DEFAULT_SQL }] },
++}));
++vi.mock("../src/servies/appConfig.service.js", () => ({
++    appConfigService: { getNewSchemaMinVersionCode: () => newSchemaLimit() },
++}));
++vi.mock("../src/utils/signatureGenerator.js", () => ({
++    signPayload: (data: unknown) => ({ data: data }),
++}));
++
++const DEFAULT_SQL = "INSERT INTO category (name) VALUES ('Food');";
++const ROWS = [
++    { id: 1, query: "CREATE TABLE a(x);", guiversion: "1.0.0" },
++    { id: 2, query: "ALTER TABLE a ADD y;", guiversion: "" },
++    { id: 3, query: "CREATE TABLE b(x);", guiversion: "35" },
++];
++
++const { dbVersionService } = await import("../src/servies/dbversion.service.js");
++
++async function check(versionCode: unknown, firstLogin = true) {
++    migrationsAfter.mockResolvedValue(ROWS);
++    const result = await dbVersionService.checkForUpdates(0, "", 7, firstLogin, true, versionCode as number);
++    return result.Data as { script: string[]; toVersion: number };
++}
++
++beforeEach(() => {
++    newSchemaLimit.mockResolvedValue(35);
++});
++
++describe("dbversion.service + build gate", () => {
++    it("old build: held-back row not sent, toVersion and guidbversion = last row sent, defaults sent", async () => {
++        const data = await check(34);
++        expect(data.script).not.toContain("CREATE TABLE b(x);");
++        expect(data.toVersion).toBe(2);
++        expect(data.script).toContain('INSERT INTO guidbversion ("dbId") VALUES (2);');
++        expect(data.script).toContain(DEFAULT_SQL);
++    });
++
++    it("new build: every row, toVersion = latest, no defaults", async () => {
++        const data = await check(35);
++        expect(data.script).toContain("CREATE TABLE b(x);");
++        expect(data.toVersion).toBe(3);
++        expect(data.script).not.toContain(DEFAULT_SQL);
++    });
++
++    it("version code not sent (old app) -> treated as old build", async () => {
++        const data = await check(undefined);
++        expect(data.toVersion).toBe(2);
++        expect(data.script).toContain(DEFAULT_SQL);
++    });
++
++    it("no limit configured -> defaults for every build", async () => {
++        newSchemaLimit.mockResolvedValue(null);
++        const data = await check(35);
++        expect(data.script).toContain(DEFAULT_SQL);
++    });
++
++    it("not first login -> no defaults", async () => {
++        const data = await check(34, false);
++        expect(data.script).not.toContain(DEFAULT_SQL);
++    });
++});
+diff --git a/tests/newSchemaConfig.test.ts b/tests/newSchemaConfig.test.ts
+new file mode 100644
+index 0000000..f64883b
+--- /dev/null
++++ b/tests/newSchemaConfig.test.ts
+@@ -0,0 +1,41 @@
++import { describe, it, expect, vi, beforeEach } from "vitest";
++
++/**
++ * 2.0 — appConfigService.getNewSchemaMinVersionCode (config key new_schema_min_version_code).
++ * config table is mocked: no database needed.
++ */
++
++const getValue = vi.fn();
++vi.mock("../src/repositories/appConfig.repository.js", () => ({
++    appConfigRepository: { getValue: (key: string) => getValue(key) },
++}));
++
++const { appConfigService } = await import("../src/servies/appConfig.service.js");
++
++beforeEach(() => {
++    getValue.mockReset();
++});
++
++describe("getNewSchemaMinVersionCode", () => {
++    it("reads new_schema_min_version_code", async () => {
++        getValue.mockImplementation(async (key: string) => (key === "new_schema_min_version_code" ? "35" : null));
++        expect(await appConfigService.getNewSchemaMinVersionCode()).toBe(35);
++    });
++
++    it("missing key -> null", async () => {
++        getValue.mockResolvedValue(null);
++        expect(await appConfigService.getNewSchemaMinVersionCode()).toBeNull();
++    });
++
++    it("invalid value -> null", async () => {
++        for (const bad of ["abc", "0", "-5", ""]) {
++            getValue.mockResolvedValue(bad);
++            expect(await appConfigService.getNewSchemaMinVersionCode()).toBeNull();
++        }
++    });
++
++    it("config read fails -> null", async () => {
++        getValue.mockRejectedValue(new Error("db down"));
++        expect(await appConfigService.getNewSchemaMinVersionCode()).toBeNull();
++    });
++});

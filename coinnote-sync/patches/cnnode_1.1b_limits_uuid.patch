@@ -1,0 +1,112 @@
+diff --git a/src/contract/limits.ts b/src/contract/limits.ts
+new file mode 100644
+index 0000000..96a6536
+--- /dev/null
++++ b/src/contract/limits.ts
+@@ -0,0 +1,28 @@
++/**
++ * Sync Limits
++ * -----------
++ * DEFAULT limits shared by phone and server.
++ * Server can override most of them at runtime from the `config` table
++ * (see servies/syncLimits.service.ts). Phone never hardcodes them: it uses
++ * the values the server reports (/sync/status).
++ */
++
++// wire format version THIS code understands. code fact, never from config.
++// bump when the wire format changes in a way old apps cannot understand
++export const CONTRACT_VERSION = 1;
++
++// defaults, used when the config key is missing or invalid
++export const DEFAULT_SYNC_LIMITS = {
++    minContractVersion: 1,       // oldest app contract version still allowed to sync
++    maxPushOps: 500,             // max operations in one push request
++    maxPushBytes: 512 * 1024,    // max push body size (512 KB), read at server start
++    pullPageSize: 500,           // max change_log rows per pull page
++};
++
++// config table keys for the overrides
++export const SYNC_LIMIT_KEYS = {
++    minContractVersion: "sync_min_contract_version",
++    maxPushOps: "sync_max_push_ops",
++    maxPushBytes: "sync_max_push_bytes",
++    pullPageSize: "sync_pull_page_size",
++};
+diff --git a/src/contract/uuidv7.ts b/src/contract/uuidv7.ts
+new file mode 100644
+index 0000000..7bbe854
+--- /dev/null
++++ b/src/contract/uuidv7.ts
+@@ -0,0 +1,18 @@
++/**
++ * UUID helpers (from the `uuid` package)
++ * - uuidv7: time-ordered UUID v7 (server uses it only to seed default categories;
++ *   phone creates all other ids)
++ * - isUuid: package validate() + lowercase check, because ids must be lowercase
++ *   everywhere (SQLite compares text exactly) and validate() also accepts uppercase
++ */
++import { validate } from "uuid";
++
++export { v7 as uuidv7 } from "uuid";
++
++// true only for valid, lowercase uuid strings
++export function isUuid(value: unknown): boolean {
++    if (typeof value !== "string") {
++        return false;
++    }
++    return validate(value) && value === value.toLowerCase();
++}
+diff --git a/src/servies/syncLimits.service.ts b/src/servies/syncLimits.service.ts
+new file mode 100644
+index 0000000..ced38d9
+--- /dev/null
++++ b/src/servies/syncLimits.service.ts
+@@ -0,0 +1,48 @@
++import { appConfigRepository } from "../repositories/appConfig.repository.js";
++import { CONTRACT_VERSION, DEFAULT_SYNC_LIMITS, SYNC_LIMIT_KEYS } from "../contract/limits.js";
++
++export type SyncLimits = typeof DEFAULT_SYNC_LIMITS;
++
++/**
++ * Reads one positive integer from config table.
++ * Missing, invalid or failing read -> default (sync must never break on bad config).
++ */
++async function readPositiveInt(key: string, defaultValue: number): Promise<number> {
++    try {
++        const raw = await appConfigRepository.getValue(key);
++        const parsed = Number.parseInt(raw ?? "", 10);
++        if (Number.isInteger(parsed) && parsed > 0) {
++            return parsed;
++        }
++        return defaultValue;
++    } catch {
++        return defaultValue;
++    }
++}
++
++/**
++ * Sync limits service
++ * Current limits = config table overrides, falling back to code defaults.
++ */
++export const syncLimitsService = {
++
++    async getLimits(): Promise<SyncLimits> {
++        const minContractVersion = await readPositiveInt(SYNC_LIMIT_KEYS.minContractVersion, DEFAULT_SYNC_LIMITS.minContractVersion);
++        const maxPushOps = await readPositiveInt(SYNC_LIMIT_KEYS.maxPushOps, DEFAULT_SYNC_LIMITS.maxPushOps);
++        const maxPushBytes = await readPositiveInt(SYNC_LIMIT_KEYS.maxPushBytes, DEFAULT_SYNC_LIMITS.maxPushBytes);
++        const pullPageSize = await readPositiveInt(SYNC_LIMIT_KEYS.pullPageSize, DEFAULT_SYNC_LIMITS.pullPageSize);
++
++        return {
++            // min can never be above what this code understands
++            minContractVersion: Math.min(minContractVersion, CONTRACT_VERSION),
++            maxPushOps: maxPushOps,
++            maxPushBytes: maxPushBytes,
++            pullPageSize: pullPageSize,
++        };
++    },
++
++    // true when the app's contract version can sync with this server
++    isContractSupported(appVersion: number, limits: SyncLimits): boolean {
++        return appVersion >= limits.minContractVersion && appVersion <= CONTRACT_VERSION;
++    },
++};

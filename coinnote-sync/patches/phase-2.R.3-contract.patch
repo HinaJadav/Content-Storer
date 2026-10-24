@@ -1,0 +1,314 @@
+diff --git a/src/contract/envelope.ts b/src/contract/envelope.ts
+index 9124d85..30637f0 100644
+--- a/src/contract/envelope.ts
++++ b/src/contract/envelope.ts
+@@ -50,17 +50,16 @@ function pushOpSchema(entity: string) {
+         op_id: uuidSchema,                         // retry key: same op_id = same operation
+         entity: z.literal(entity),
+         id: uuidSchema,
+-        kind: z.enum(["upsert", "delete"]),
+-        base_seq: z.number().int().min(0).nullable(), // server seq the phone last saw, null = new row
+-        data: z.object(shape).strict().optional(),     // full row for upsert, absent for delete
+-    }).strict().superRefine((op, ctx) => {
+-        if (op.kind === "upsert" && !op.data) {
+-            ctx.addIssue({ code: "custom", message: "upsert needs data" });
++        op: z.enum(["INSERT", "UPDATE", "DELETE"]),
++        data: z.object(shape).strict().optional(),     // full row for INSERT / UPDATE, absent for DELETE
++    }).strict().superRefine((item, ctx) => {
++        if (item.op !== "DELETE" && !item.data) {
++            ctx.addIssue({ code: "custom", message: "INSERT / UPDATE needs data" });
+         }
+-        if (op.kind === "delete" && op.data) {
+-            ctx.addIssue({ code: "custom", message: "delete must not have data" });
++        if (item.op === "DELETE" && item.data) {
++            ctx.addIssue({ code: "custom", message: "DELETE must not have data" });
+         }
+-        if (op.data && op.data.id !== op.id) {
++        if (item.data && item.data.id !== item.id) {
+             ctx.addIssue({ code: "custom", message: "data.id must match id" });
+         }
+     });
+@@ -68,14 +67,15 @@ function pushOpSchema(entity: string) {
+ 
+ const opSchemas = SYNC_ENTITIES.map((entity) => pushOpSchema(entity));
+ 
+-// POST /sync/push body
++// POST /sync/push body: last_synced_version = last server version the phone has, sent once
+ export const pushRequestSchema = z.object({
++    last_synced_version: z.number().int().min(0),
+     ops: z.array(z.union(opSchemas as unknown as [z.ZodType, z.ZodType, ...z.ZodType[]])).min(1),
+ }).strict();
+ 
+-// POST /sync/pull body: cursor = last seq the phone has (0 on a fresh phone)
++// POST /sync/pull body: last_synced_version = last server version the phone has (0 on a fresh phone)
+ export const pullRequestSchema = z.object({
+-    cursor: z.number().int().min(0),
++    last_synced_version: z.number().int().min(0),
+ }).strict();
+ 
+ export type PushRequest = z.infer<typeof pushRequestSchema>;
+diff --git a/src/contract/limits.ts b/src/contract/limits.ts
+index 96a6536..3ac269e 100644
+--- a/src/contract/limits.ts
++++ b/src/contract/limits.ts
+@@ -4,7 +4,7 @@
+  * DEFAULT limits shared by phone and server.
+  * Server can override most of them at runtime from the `config` table
+  * (see servies/syncLimits.service.ts). Phone never hardcodes them: it uses
+- * the values the server reports (/sync/status).
++ * the values the server reports in the /sync/pull reply.
+  */
+ 
+ // wire format version THIS code understands. code fact, never from config.
+@@ -17,6 +17,7 @@ export const DEFAULT_SYNC_LIMITS = {
+     maxPushOps: 500,             // max operations in one push request
+     maxPushBytes: 512 * 1024,    // max push body size (512 KB), read at server start
+     pullPageSize: 500,           // max change_log rows per pull page
++    logWindowDays: 60,           // server keeps change_log this long; older phones do a full restore
+ };
+ 
+ // config table keys for the overrides
+@@ -25,4 +26,5 @@ export const SYNC_LIMIT_KEYS = {
+     maxPushOps: "sync_max_push_ops",
+     maxPushBytes: "sync_max_push_bytes",
+     pullPageSize: "sync_pull_page_size",
++    logWindowDays: "sync_log_window_days",
+ };
+diff --git a/src/contract/registry.ts b/src/contract/registry.ts
+index a037ec9..d5cd6f6 100644
+--- a/src/contract/registry.ts
++++ b/src/contract/registry.ts
+@@ -8,10 +8,10 @@
+  * Rules:
+  * - Only columns listed here travel on the wire.
+  * - user_id is NEVER on the wire: server takes it from the access token.
+- * - Server-only columns (user_id, updated_seq, last_op_id, created_at, updated_at)
+- *   and device-only columns (server_seq, dirty, billstatus, smssender, deduphash)
++ * - Server-only columns (user_id, created_at, updated_at)
++ *   and device-only columns (billstatus, smssender, deduphash)
+  *   are intentionally not listed.
+- * - Deletes are an operation ("delete"), not a column. The row is removed and the
++ * - Deletes are an operation ("DELETE"), not a column. The row is removed and the
+  *   server keeps only a note in change_log (decision D3).
+  */
+ 
+diff --git a/src/servies/syncLimits.service.ts b/src/servies/syncLimits.service.ts
+index ced38d9..3f75f99 100644
+--- a/src/servies/syncLimits.service.ts
++++ b/src/servies/syncLimits.service.ts
+@@ -31,6 +31,7 @@ export const syncLimitsService = {
+         const maxPushOps = await readPositiveInt(SYNC_LIMIT_KEYS.maxPushOps, DEFAULT_SYNC_LIMITS.maxPushOps);
+         const maxPushBytes = await readPositiveInt(SYNC_LIMIT_KEYS.maxPushBytes, DEFAULT_SYNC_LIMITS.maxPushBytes);
+         const pullPageSize = await readPositiveInt(SYNC_LIMIT_KEYS.pullPageSize, DEFAULT_SYNC_LIMITS.pullPageSize);
++        const logWindowDays = await readPositiveInt(SYNC_LIMIT_KEYS.logWindowDays, DEFAULT_SYNC_LIMITS.logWindowDays);
+ 
+         return {
+             // min can never be above what this code understands
+@@ -38,6 +39,7 @@ export const syncLimitsService = {
+             maxPushOps: maxPushOps,
+             maxPushBytes: maxPushBytes,
+             pullPageSize: pullPageSize,
++            logWindowDays: logWindowDays,
+         };
+     },
+ 
+diff --git a/tests/envelope.test.ts b/tests/envelope.test.ts
+new file mode 100644
+index 0000000..516b6a4
+--- /dev/null
++++ b/tests/envelope.test.ts
+@@ -0,0 +1,130 @@
++import { describe, it, expect } from "vitest";
++import { pushRequestSchema, pullRequestSchema } from "../src/contract/envelope.js";
++
++/**
++ * 2.R step 3 (R6, R10) — push/pull request shape.
++ * op = INSERT | UPDATE | DELETE, no base_seq, last_synced_version sent once per request.
++ */
++
++const BILL_ID = "01900000-0000-7000-8000-0000000000b1";
++const CAT_ID = "01900000-0000-7000-8000-000000000001";
++const OP_ID = "01900000-0000-7000-8000-0000000000e1";
++
++const billData = {
++    id: BILL_ID,
++    category_id: CAT_ID,
++    amount_paise: 4500,
++    type: "E",
++    date: "2026-10-18 10:30:00",
++    title: "Tea",
++    description: null,
++};
++
++function billOp(overrides: Record<string, unknown> = {}) {
++    return { op_id: OP_ID, entity: "bill", id: BILL_ID, op: "INSERT", data: billData, ...overrides };
++}
++
++function push(ops: unknown[], extra: Record<string, unknown> = {}) {
++    return pushRequestSchema.safeParse({ last_synced_version: 0, ops: ops, ...extra });
++}
++
++describe("push request — valid", () => {
++    it("accepts INSERT with data", () => {
++        expect(push([billOp()]).success).toBe(true);
++    });
++
++    it("accepts UPDATE with data", () => {
++        expect(push([billOp({ op: "UPDATE" })]).success).toBe(true);
++    });
++
++    it("accepts DELETE without data", () => {
++        expect(push([{ op_id: OP_ID, entity: "bill", id: BILL_ID, op: "DELETE" }]).success).toBe(true);
++    });
++
++    it("accepts several entities in one push", () => {
++        const category = { op_id: OP_ID, entity: "category", id: CAT_ID, op: "INSERT",
++            data: { id: CAT_ID, name: "Food", type: "E", parent_id: null, icon: null } };
++        expect(push([category, billOp()]).success).toBe(true);
++    });
++});
++
++describe("push request — invalid op", () => {
++    it("rejects DELETE with data", () => {
++        expect(push([billOp({ op: "DELETE" })]).success).toBe(false);
++    });
++
++    it("rejects INSERT without data", () => {
++        expect(push([billOp({ data: undefined })]).success).toBe(false);
++    });
++
++    it("rejects old op value 'upsert'", () => {
++        expect(push([billOp({ op: "upsert" })]).success).toBe(false);
++    });
++
++    it("rejects old field 'kind'", () => {
++        const op: Record<string, unknown> = billOp({ kind: "upsert" });
++        delete op.op;
++        expect(push([op]).success).toBe(false);
++    });
++
++    it("rejects base_seq (removed)", () => {
++        expect(push([billOp({ base_seq: 3 })]).success).toBe(false);
++    });
++
++    it("rejects data.id different from id", () => {
++        expect(push([billOp({ data: { ...billData, id: CAT_ID } })]).success).toBe(false);
++    });
++
++    it("rejects user_id inside data", () => {
++        expect(push([billOp({ data: { ...billData, user_id: 5 } })]).success).toBe(false);
++    });
++
++    it("rejects uppercase uuid", () => {
++        expect(push([billOp({ op_id: OP_ID.toUpperCase() })]).success).toBe(false);
++    });
++
++    it("rejects unknown entity", () => {
++        expect(push([billOp({ entity: "users" })]).success).toBe(false);
++    });
++});
++
++describe("push request — envelope", () => {
++    it("rejects empty ops", () => {
++        expect(push([]).success).toBe(false);
++    });
++
++    it("rejects missing last_synced_version", () => {
++        expect(pushRequestSchema.safeParse({ ops: [billOp()] }).success).toBe(false);
++    });
++
++    it("rejects negative last_synced_version", () => {
++        expect(push([billOp()], { last_synced_version: -1 }).success).toBe(false);
++    });
++
++    it("rejects non-integer last_synced_version", () => {
++        expect(push([billOp()], { last_synced_version: 1.5 }).success).toBe(false);
++    });
++
++    it("rejects extra top-level keys", () => {
++        expect(push([billOp()], { user_id: 5 }).success).toBe(false);
++    });
++});
++
++describe("pull request", () => {
++    it("accepts last_synced_version 0 (new phone)", () => {
++        expect(pullRequestSchema.safeParse({ last_synced_version: 0 }).success).toBe(true);
++    });
++
++    it("accepts a positive last_synced_version", () => {
++        expect(pullRequestSchema.safeParse({ last_synced_version: 25 }).success).toBe(true);
++    });
++
++    it("rejects old field 'cursor'", () => {
++        expect(pullRequestSchema.safeParse({ cursor: 25 }).success).toBe(false);
++    });
++
++    it("rejects negative or missing last_synced_version", () => {
++        expect(pullRequestSchema.safeParse({ last_synced_version: -1 }).success).toBe(false);
++        expect(pullRequestSchema.safeParse({}).success).toBe(false);
++    });
++});
+diff --git a/tests/syncLimits.test.ts b/tests/syncLimits.test.ts
+new file mode 100644
+index 0000000..c79bd41
+--- /dev/null
++++ b/tests/syncLimits.test.ts
+@@ -0,0 +1,58 @@
++import { describe, it, expect, vi, beforeEach } from "vitest";
++
++/**
++ * 2.R step 3 (R7) — logWindowDays limit (server change_log window, P3-D2).
++ * config table is mocked: no database needed.
++ */
++
++const getValue = vi.fn();
++vi.mock("../src/repositories/appConfig.repository.js", () => ({
++    appConfigRepository: { getValue: (key: string) => getValue(key) },
++}));
++
++const { syncLimitsService } = await import("../src/servies/syncLimits.service.js");
++const { DEFAULT_SYNC_LIMITS, SYNC_LIMIT_KEYS } = await import("../src/contract/limits.js");
++
++beforeEach(() => {
++    getValue.mockReset();
++});
++
++describe("logWindowDays", () => {
++    it("default is 60 days", () => {
++        expect(DEFAULT_SYNC_LIMITS.logWindowDays).toBe(60);
++        expect(SYNC_LIMIT_KEYS.logWindowDays).toBe("sync_log_window_days");
++    });
++
++    it("uses a valid config override", async () => {
++        getValue.mockImplementation(async (key: string) => (key === "sync_log_window_days" ? "30" : null));
++        const limits = await syncLimitsService.getLimits();
++        expect(limits.logWindowDays).toBe(30);
++    });
++
++    it("falls back to 60 when the key is missing", async () => {
++        getValue.mockResolvedValue(null);
++        const limits = await syncLimitsService.getLimits();
++        expect(limits.logWindowDays).toBe(60);
++    });
++
++    it("falls back to 60 on invalid values", async () => {
++        for (const bad of ["abc", "0", "-5", ""]) {
++            getValue.mockImplementation(async (key: string) => (key === "sync_log_window_days" ? bad : null));
++            const limits = await syncLimitsService.getLimits();
++            expect(limits.logWindowDays).toBe(60);
++        }
++    });
++
++    it("falls back to 60 when the config read fails", async () => {
++        getValue.mockRejectedValue(new Error("db down"));
++        const limits = await syncLimitsService.getLimits();
++        expect(limits.logWindowDays).toBe(60);
++    });
++
++    it("other limits still work", async () => {
++        getValue.mockResolvedValue(null);
++        const limits = await syncLimitsService.getLimits();
++        expect(limits.maxPushOps).toBe(500);
++        expect(limits.pullPageSize).toBe(500);
++    });
++});

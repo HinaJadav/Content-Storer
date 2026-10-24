@@ -1,0 +1,90 @@
+diff --git a/src/controllers/dbversion.controller.ts b/src/controllers/dbversion.controller.ts
+index 89bb47e..df01440 100644
+--- a/src/controllers/dbversion.controller.ts
++++ b/src/controllers/dbversion.controller.ts
+@@ -1,5 +1,6 @@
+ import { dbVersionService } from "../servies/dbversion.service.js";
+ import { response } from "../utils/response.js";
++import { jwtUtils } from "../utils/jwt.utils.js";
+ 
+ /**
+  * DB Version Controller
+@@ -51,10 +52,29 @@ export const dbVersionController = {
+ 
+         
+         const currentVersion = Number(req.body.currentVersion);
+-        const userId = req.body.userId;
+         const IsFirstTimeLogin = req.body.IsFirstTimeLogin;
+         const GUIVersion = req.body.GUIVersion;
+ 
++        // identify caller from access token (if sent)
++        // valid token   -> userid taken from token, real profile can be sent
++        // no/bad token  -> old builds, userId from body, never send personal data
++        // **HJ - once all users are on new build, remove this and use authMiddleware on route
++        let userId = Number(req.body.userId);
++        let includeProfile = false;
++
++        const token = jwtUtils.extractTokenFromHeader(req.headers.authorization);
++        if (token) {
++            const verify = jwtUtils.verifyAccessToken(token);
++            if (verify.success && verify.payload) {
++                userId = Number(verify.payload.userid);
++                includeProfile = true;
++            }
++        }
++
++        if (!includeProfile) {
++            console.log("DBVersionController.check: tokenless call, placeholder profile will be sent");
++        }
++
+         // 1) Validate request body existence and required field
+         if (!userId) {
+             return res.json(
+@@ -81,7 +101,7 @@ export const dbVersionController = {
+         }
+ 
+         // 3) Delegate version comparison and script generation to service layer
+-        const result = await dbVersionService.checkForUpdates(currentVersion, GUIVersion, userId,IsFirstTimeLogin);
++        const result = await dbVersionService.checkForUpdates(currentVersion, GUIVersion, userId, IsFirstTimeLogin, includeProfile);
+ 
+         // 4) Return service response as-is
+         return res.json(result);
+diff --git a/src/servies/dbversion.service.ts b/src/servies/dbversion.service.ts
+index 2e051ea..5dbea7f 100644
+--- a/src/servies/dbversion.service.ts
++++ b/src/servies/dbversion.service.ts
+@@ -13,6 +13,8 @@ export const dbVersionService = {
+    * Checks if client DB version is outdated and returns migration script if needed.
+    *
+    * @param currentVersion - DB version currently present on client (mobile)
++   * @param includeProfile - true only when caller is verified by access token.
++   *                         false -> placeholder user row, no personal data
+    * @returns apiResponse with migration info and SQL script
+    */
+   async checkForUpdates(
+@@ -20,6 +22,7 @@ export const dbVersionService = {
+     GUIVersion: string,
+     userId: number,
+     IsFirstTimeLogin: boolean,
++    includeProfile: boolean,
+   ): Promise<apiResponse<any>> {
+     try {
+       // 1) Validate input
+@@ -91,9 +94,16 @@ export const dbVersionService = {
+       // user info will only be synced on first time login, so we can check for that
+       if (IsFirstTimeLogin) {
+         // Append dynamic user data sync queries
++        // verified caller -> real profile
++        // unverified caller -> placeholder row (same columns, blank values) so app can continue
++        // without exposing personal data. email must stay unique on device.
++        const userInsertQuery = includeProfile
++          ? `INSERT INTO users ("id","name", "mobilenumber","password","email","age","gender","city","profession") VALUES (${userId},'${userData.name}', '${userData.mobilenumber ?? ""}','','${userData.email}',${userData.age},'${userData.gender ?? ""}','${userData.city ?? ""}','${userData.profession ?? ""}');`
++          : `INSERT INTO users ("id","name", "mobilenumber","password","email","age","gender","city","profession") VALUES (${userId},'', '','','user${userId}@placeholder.local',null,'','','');`;
++
+         const userSyncQuery = [
+           `DELETE FROM users where id = ${userId};`, // clear ALL previous user data
+-          `INSERT INTO users ("id","name", "mobilenumber","password","email","age","gender","city","profession") VALUES (${userId},'${userData.name}', '${userData.mobilenumber ?? ""}','','${userData.email}',${userData.age},'${userData.gender ?? ""}','${userData.city ?? ""}','${userData.profession ?? ""}');`,
++          userInsertQuery,
+         ];
+ 
+         scriptArray.push(...userSyncQuery);
