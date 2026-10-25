@@ -1,0 +1,428 @@
+diff --git a/data/database/uuidMigration/migrateToUuid.ts b/data/database/uuidMigration/migrateToUuid.ts
+new file mode 100644
+index 0000000..fb7ae74
+--- /dev/null
++++ b/data/database/uuidMigration/migrateToUuid.ts
+@@ -0,0 +1,40 @@
++import { ResponseParams } from "@/interfaces/interface";
++import { response } from "@/util/response";
++import { copyAllData, createNewTables } from "./copyData";
++import { MigrationDb } from "./migrationDb";
++import { swapTables } from "./swapTables";
++import { verifyCopy } from "./verifyCopy";
++
++/**
++ * UUID migration — full run (2.1d).
++ * One transaction: create new tables -> copy -> verify -> swap -> commit.
++ * Any error or failed check rolls back: old tables stay exactly as they were and
++ * PRAGMA user_version stays 0, so the next launch can try again.
++ *
++ * NOT wired into the app yet (Phase 2 last step, together with 2.3 - 2.6).
++ *
++ * @param newId - creates one new id (uuid v7 in the app)
++ * @param now - created_at for outbox rows ("YYYY-MM-DD HH:MM:SS")
++ * @returns ResponseParams, IsError true with the reason when rolled back
++ */
++export function migrateToUuid(db: MigrationDb, newId: () => string, now: string): ResponseParams<null> {
++  db.exec("BEGIN IMMEDIATE");
++  try {
++    createNewTables(db);
++    const copy = copyAllData(db, newId, now);
++
++    const problems = verifyCopy(db, copy.idMaps);
++    if (problems.length > 0) {
++      db.exec("ROLLBACK");
++      return response(null, true, "verify failed: " + problems.join("; "), 500);
++    }
++
++    swapTables(db);
++    db.exec("COMMIT");
++    return response(null, false, "", 200);
++  } catch (error) {
++    db.exec("ROLLBACK");
++    const message = error instanceof Error ? error.message : String(error);
++    return response(null, true, "uuid migration failed: " + message, 500);
++  }
++}
+diff --git a/data/database/uuidMigration/swapTables.ts b/data/database/uuidMigration/swapTables.ts
+new file mode 100644
+index 0000000..e28c1fd
+--- /dev/null
++++ b/data/database/uuidMigration/swapTables.ts
+@@ -0,0 +1,35 @@
++import { MigrationDb } from "./migrationDb";
++
++/**
++ * UUID migration — swap step (2.1d).
++ * Drops the old tables, gives the *_new tables the normal names, recreates the
++ * ATT indexes on the new bill table and marks the phone as migrated.
++ * Must run inside the migration transaction, after verifyCopy found no problems.
++ */
++
++// version written into the DB file when the UUID migration is done
++export const UUID_MIGRATION_USER_VERSION = 1;
++
++export function swapTables(db: MigrationDb): void {
++  // old indexes (idx_bill_pending, idx_bill_deduphash) are dropped with the old bill table
++  db.exec(`
++    DROP TABLE category;
++    DROP TABLE bill;
++    DROP TABLE budget;
++    DROP TABLE bill_docurl;
++
++    ALTER TABLE category_new RENAME TO category;
++    ALTER TABLE bill_new RENAME TO bill;
++    ALTER TABLE budget_new RENAME TO budget;
++    ALTER TABLE bill_docurl_new RENAME TO bill_docurl;
++  `);
++
++  // same ATT partial indexes as today, now on the new column names
++  db.exec(`
++    CREATE INDEX IF NOT EXISTS idx_bill_pending ON bill(user_id) WHERE billstatus = 'D';
++    CREATE INDEX IF NOT EXISTS idx_bill_deduphash ON bill(deduphash) WHERE deduphash IS NOT NULL;
++  `);
++
++  // saved inside the same transaction: data and "done" mark commit together or not at all
++  db.exec(`PRAGMA user_version = ${UUID_MIGRATION_USER_VERSION}`);
++}
+diff --git a/data/database/uuidMigration/verifyCopy.ts b/data/database/uuidMigration/verifyCopy.ts
+new file mode 100644
+index 0000000..ffa1a5b
+--- /dev/null
++++ b/data/database/uuidMigration/verifyCopy.ts
+@@ -0,0 +1,128 @@
++import { IdMaps } from "./copyData";
++import { MigrationDb } from "./migrationDb";
++
++/**
++ * UUID migration — verify step (2.1d).
++ * Compares the old tables with the *_new tables BEFORE the swap.
++ * Any problem means the copy can't be trusted and the migration must roll back.
++ *
++ * @returns list of problems, empty list = copy is complete
++ */
++
++function countOf(db: MigrationDb, sql: string, params: unknown[] = []): number {
++  const rows = db.all<{ n: number }>(sql, params);
++  return rows.length > 0 ? Number(rows[0].n) : 0;
++}
++
++function checkCounts(db: MigrationDb, problems: string[]): void {
++  // "Uncategorized" rows created for orphans are new, everything else is 1:1
++  const oldCategories = countOf(db, `SELECT COUNT(*) AS n FROM category`);
++  const oldUncategorized = countOf(db, `SELECT COUNT(*) AS n FROM category WHERE name = 'Uncategorized'`);
++  const newCategories = countOf(db, `SELECT COUNT(*) AS n FROM category_new`);
++  const newUncategorized = countOf(db, `SELECT COUNT(*) AS n FROM category_new WHERE name = 'Uncategorized'`);
++  if (newCategories !== oldCategories + (newUncategorized - oldUncategorized)) {
++    problems.push(`category count: old ${oldCategories}, new ${newCategories}`);
++  }
++
++  for (const table of ["bill", "budget"]) {
++    const oldCount = countOf(db, `SELECT COUNT(*) AS n FROM ${table}`);
++    const newCount = countOf(db, `SELECT COUNT(*) AS n FROM ${table}_new`);
++    if (oldCount !== newCount) {
++      problems.push(`${table} count: old ${oldCount}, new ${newCount}`);
++    }
++  }
++
++  // attachments of bills that no longer exist are not copied
++  const oldDocs = countOf(db, `SELECT COUNT(*) AS n FROM bill_docurl WHERE billid IN (SELECT id FROM bill)`);
++  const newDocs = countOf(db, `SELECT COUNT(*) AS n FROM bill_docurl_new`);
++  if (oldDocs !== newDocs) {
++    problems.push(`bill_docurl count: old ${oldDocs}, new ${newDocs}`);
++  }
++}
++
++// row by row: old ROUND(amount * 100) must equal new paise for the same row
++function checkMoney(db: MigrationDb, maps: IdMaps, problems: string[]): void {
++  const newBills = new Map<string, number>();
++  for (const row of db.all<{ id: string; amount_paise: number }>(`SELECT id, amount_paise FROM bill_new`)) {
++    newBills.set(row.id, Number(row.amount_paise));
++  }
++  let badBills = 0;
++  for (const row of db.all<{ id: number; amount: number }>(`SELECT id, amount FROM bill`)) {
++    const newId = maps.bill.get(row.id);
++    const expected = Math.round(Number(row.amount) * 100);
++    if (newId === undefined || newBills.get(newId) !== expected) {
++      badBills++;
++    }
++  }
++  if (badBills > 0) {
++    problems.push(`bill money: ${badBills} row(s) differ`);
++  }
++
++  const newBudgets = new Map<string, { limit: number; used: number }>();
++  for (const row of db.all<{ id: string; limit_paise: number; used_paise: number }>(`SELECT id, limit_paise, used_paise FROM budget_new`)) {
++    newBudgets.set(row.id, { limit: Number(row.limit_paise), used: Number(row.used_paise) });
++  }
++  let badBudgets = 0;
++  for (const row of db.all<{ id: number; initialbudget: number; usedamount: number | null }>(`SELECT id, initialbudget, usedamount FROM budget`)) {
++    const newId = maps.budget.get(row.id);
++    const copy = newId === undefined ? undefined : newBudgets.get(newId);
++    const expectedLimit = Math.round(Number(row.initialbudget) * 100);
++    const expectedUsed = Math.round(Number(row.usedamount ?? 0) * 100);
++    if (copy === undefined || copy.limit !== expectedLimit || copy.used !== expectedUsed) {
++      badBudgets++;
++    }
++  }
++  if (badBudgets > 0) {
++    problems.push(`budget money: ${badBudgets} row(s) differ`);
++  }
++}
++
++function checkLinks(db: MigrationDb, problems: string[]): void {
++  // drafts may have no category; every other bill must point to an existing category
++  const badBills = countOf(db, `
++    SELECT COUNT(*) AS n FROM bill_new b
++    WHERE (b.category_id IS NULL AND b.billstatus <> 'D')
++       OR (b.category_id IS NOT NULL AND b.category_id NOT IN (SELECT id FROM category_new))`);
++  if (badBills > 0) {
++    problems.push(`bill link: ${badBills} row(s) without a valid category`);
++  }
++
++  const badBudgets = countOf(db, `SELECT COUNT(*) AS n FROM budget_new WHERE category_id NOT IN (SELECT id FROM category_new)`);
++  if (badBudgets > 0) {
++    problems.push(`budget link: ${badBudgets} row(s) without a valid category`);
++  }
++
++  const badParents = countOf(db, `
++    SELECT COUNT(*) AS n FROM category_new
++    WHERE (parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM category_new))
++       OR (root_category_id IS NOT NULL AND root_category_id NOT IN (SELECT id FROM category_new))`);
++  if (badParents > 0) {
++    problems.push(`category link: ${badParents} row(s) with a missing parent / root`);
++  }
++
++  const badDocs = countOf(db, `SELECT COUNT(*) AS n FROM bill_docurl_new WHERE bill_id NOT IN (SELECT id FROM bill_new)`);
++  if (badDocs > 0) {
++    problems.push(`bill_docurl link: ${badDocs} row(s) without a bill`);
++  }
++}
++
++// one INSERT per category, budget and confirmed bill (drafts are not synced)
++function checkOutbox(db: MigrationDb, problems: string[]): void {
++  const expected =
++    countOf(db, `SELECT COUNT(*) AS n FROM category_new`) +
++    countOf(db, `SELECT COUNT(*) AS n FROM budget_new`) +
++    countOf(db, `SELECT COUNT(*) AS n FROM bill_new WHERE billstatus <> 'D'`);
++  const actual = countOf(db, `SELECT COUNT(*) AS n FROM sync_outbox`);
++  if (expected !== actual) {
++    problems.push(`outbox count: expected ${expected}, found ${actual}`);
++  }
++}
++
++export function verifyCopy(db: MigrationDb, maps: IdMaps): string[] {
++  const problems: string[] = [];
++  checkCounts(db, problems);
++  checkMoney(db, maps, problems);
++  checkLinks(db, problems);
++  checkOutbox(db, problems);
++  return problems;
++}
+diff --git a/tests/uuidMigration/migrateToUuid.test.ts b/tests/uuidMigration/migrateToUuid.test.ts
+new file mode 100644
+index 0000000..40be796
+--- /dev/null
++++ b/tests/uuidMigration/migrateToUuid.test.ts
+@@ -0,0 +1,117 @@
++import { describe, it, expect } from "vitest";
++import Database from "better-sqlite3";
++import { createOldDb, insertSampleData, fakeIdGenerator, wrap } from "./oldDb";
++import { migrateToUuid } from "@/data/database/uuidMigration/migrateToUuid";
++import { MigrationDb } from "@/data/database/uuidMigration/migrationDb";
++
++/**
++ * 2.1d — full migration in one transaction: create -> copy -> verify -> swap -> commit.
++ * Any failure rolls back: old tables untouched, user_version stays 0.
++ */
++
++const NOW = "2026-10-25 10:00:00";
++
++function oldPhone() {
++  const raw = createOldDb();
++  insertSampleData(raw);
++  return raw;
++}
++
++function columns(raw: Database.Database, table: string): string[] {
++  return (raw.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
++}
++
++function userVersion(raw: Database.Database): number {
++  return raw.pragma("user_version", { simple: true }) as number;
++}
++
++describe("migrateToUuid — success", () => {
++  it("returns success in ResponseParams format", () => {
++    const result = migrateToUuid(wrap(oldPhone()), fakeIdGenerator(), NOW);
++    expect(result.IsError).toBe(false);
++    expect(result.ErrorMessage).toBe("");
++    expect(result.StatusCode).toBe(200);
++  });
++
++  it("tables have their normal names with the new columns", () => {
++    const raw = oldPhone();
++    migrateToUuid(wrap(raw), fakeIdGenerator(), NOW);
++    expect(columns(raw, "bill")).toContain("amount_paise");
++    expect(columns(raw, "bill")).not.toContain("amount");
++    expect(columns(raw, "category")).toContain("parent_id");
++    expect(columns(raw, "budget")).toContain("limit_paise");
++    expect(columns(raw, "bill_docurl")).toContain("bill_id");
++    const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((t) => t.name);
++    expect(tables.some((t) => t.endsWith("_new"))).toBe(false);
++    expect(tables).toContain("sync_outbox");
++    expect(tables).toContain("sync_state");
++  });
++
++  it("data is correct after the swap", () => {
++    const raw = oldPhone();
++    migrateToUuid(wrap(raw), fakeIdGenerator(), NOW);
++    const tea = raw.prepare("SELECT * FROM bill WHERE title = 'Tea'").get() as any;
++    expect(tea.amount_paise).toBe(45050);
++    const cat = raw.prepare("SELECT name FROM category WHERE id = ?").get(tea.category_id) as any;
++    expect(cat.name).toBe("Tea");
++  });
++
++  it("ATT indexes exist on the new bill table", () => {
++    const raw = oldPhone();
++    migrateToUuid(wrap(raw), fakeIdGenerator(), NOW);
++    const indexes = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'bill'").all() as { name: string }[]).map((i) => i.name);
++    expect(indexes).toContain("idx_bill_pending");
++    expect(indexes).toContain("idx_bill_deduphash");
++  });
++
++  it("marks the phone as migrated (user_version = 1)", () => {
++    const raw = oldPhone();
++    expect(userVersion(raw)).toBe(0);
++    migrateToUuid(wrap(raw), fakeIdGenerator(), NOW);
++    expect(userVersion(raw)).toBe(1);
++  });
++});
++
++describe("migrateToUuid — failure rolls back everything", () => {
++  it("error in the middle: old tables untouched, user_version 0, IsError true", () => {
++    const raw = oldPhone();
++    let calls = 0;
++    // id generator that breaks after a few ids (simulates a crash mid-copy)
++    const brokenId = () => {
++      calls++;
++      if (calls > 5) {
++        throw new Error("boom");
++      }
++      return "id-" + calls;
++    };
++    const result = migrateToUuid(wrap(raw), brokenId, NOW);
++    expect(result.IsError).toBe(true);
++    expect(result.ErrorMessage).toContain("boom");
++    expect(columns(raw, "bill")).toContain("amount");
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM bill").get() as any).n).toBe(4);
++    expect(userVersion(raw)).toBe(0);
++    const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((t) => t.name);
++    expect(tables.some((t) => t.endsWith("_new") || t.startsWith("sync_"))).toBe(false);
++  });
++
++  it("failed verify: rolled back, problems in the message", () => {
++    const raw = oldPhone();
++    const real = wrap(raw);
++    // wrapper that drops one copied bill, so verify must fail
++    const lossy: MigrationDb = {
++      exec: (sql) => real.exec(sql),
++      all: (sql, params) => real.all(sql, params),
++      run: (sql, params) => {
++        if (sql.includes("INSERT INTO bill_new") && Array.isArray(params) && params[7] === "Tea") {
++          return;
++        }
++        real.run(sql, params);
++      },
++    };
++    const result = migrateToUuid(lossy, fakeIdGenerator(), NOW);
++    expect(result.IsError).toBe(true);
++    expect(result.ErrorMessage).toContain("verify failed");
++    expect(columns(raw, "bill")).toContain("amount");
++    expect(userVersion(raw)).toBe(0);
++  });
++});
+diff --git a/tests/uuidMigration/verifyCopy.test.ts b/tests/uuidMigration/verifyCopy.test.ts
+new file mode 100644
+index 0000000..5c682e6
+--- /dev/null
++++ b/tests/uuidMigration/verifyCopy.test.ts
+@@ -0,0 +1,78 @@
++import { describe, it, expect } from "vitest";
++import { createOldDb, insertSampleData, fakeIdGenerator, wrap } from "./oldDb";
++import { createNewTables, copyAllData } from "@/data/database/uuidMigration/copyData";
++import { verifyCopy } from "@/data/database/uuidMigration/verifyCopy";
++
++/**
++ * 2.1d — checks between old and *_new tables before the swap.
++ * verifyCopy returns a list of problems; empty list = copy is complete.
++ * It gets the id maps from the copy step to compare money row by row.
++ */
++
++function copied() {
++  const raw = createOldDb();
++  insertSampleData(raw);
++  const db = wrap(raw);
++  createNewTables(db);
++  const result = copyAllData(db, fakeIdGenerator(), "2026-10-25 10:00:00");
++  return { db: db, maps: result.idMaps };
++}
++
++describe("verifyCopy", () => {
++  it("a complete copy has no problems", () => {
++    const { db, maps } = copied();
++    expect(verifyCopy(db, maps)).toEqual([]);
++  });
++
++  it("reports a missing row", () => {
++    const { db, maps } = copied();
++    db.run("DELETE FROM bill_new WHERE title = 'Tea'");
++    const problems = verifyCopy(db, maps);
++    expect(problems.some((p) => p.includes("bill") && p.includes("count"))).toBe(true);
++  });
++
++  it("reports changed money in a bill (row by row)", () => {
++    const { db, maps } = copied();
++    db.run("UPDATE bill_new SET amount_paise = amount_paise + 100 WHERE title = 'Tea'");
++    const problems = verifyCopy(db, maps);
++    expect(problems.some((p) => p.includes("bill") && p.includes("money"))).toBe(true);
++  });
++
++  it("catches a +1 / -1 error that keeps the grand total equal", () => {
++    const { db, maps } = copied();
++    db.run("UPDATE bill_new SET amount_paise = amount_paise + 1 WHERE title = 'Tea'");
++    db.run("UPDATE bill_new SET amount_paise = amount_paise - 1 WHERE title = 'Pay'");
++    expect(verifyCopy(db, maps).some((p) => p.includes("money"))).toBe(true);
++  });
++
++  it("reports changed money in a budget", () => {
++    const { db, maps } = copied();
++    db.run("UPDATE budget_new SET limit_paise = 1");
++    expect(verifyCopy(db, maps).some((p) => p.includes("budget") && p.includes("money"))).toBe(true);
++  });
++
++  it("reports a bill pointing to a missing category", () => {
++    const { db, maps } = copied();
++    db.run("UPDATE bill_new SET category_id = 'nope' WHERE title = 'Tea'");
++    expect(verifyCopy(db, maps).some((p) => p.includes("link"))).toBe(true);
++  });
++
++  it("draft without category is not a broken link", () => {
++    const { db, maps } = copied();
++    const draft = db.all<any>("SELECT category_id FROM bill_new WHERE billstatus = 'D'")[0];
++    expect(draft.category_id).toBeNull();
++    expect(verifyCopy(db, maps)).toEqual([]);
++  });
++
++  it("reports a child category whose parent is missing", () => {
++    const { db, maps } = copied();
++    db.run("UPDATE category_new SET parent_id = 'nope' WHERE name = 'Tea'");
++    expect(verifyCopy(db, maps).some((p) => p.includes("link"))).toBe(true);
++  });
++
++  it("reports a missing outbox row", () => {
++    const { db, maps } = copied();
++    db.run("DELETE FROM sync_outbox WHERE entity = 'budget'");
++    expect(verifyCopy(db, maps).some((p) => p.includes("outbox"))).toBe(true);
++  });
++});
