@@ -1,0 +1,281 @@
+diff --git a/data/database/sync/defaultCategories.ts b/data/database/sync/defaultCategories.ts
+new file mode 100644
+index 0000000..f94b7d1
+--- /dev/null
++++ b/data/database/sync/defaultCategories.ts
+@@ -0,0 +1,147 @@
++import { ResponseParams } from "@/interfaces/interface";
++import { response } from "@/util/response";
++import { v7 as uuidv7 } from "uuid";
++import { SqlDb } from "../sqlDb";
++import { addOutboxOp } from "./outboxRepo";
++
++/**
++ * App-side default categories (decision P2-D3).
++ * New-schema builds create these themselves on first login (the server no longer
++ * sends defaultQuery to them). Same list as the live server defaultQuery rows:
++ * 11 parents + 25 children; children take their parent's type.
++ */
++
++export interface DefaultCategory {
++  name: string;
++  type: "I" | "E";
++  icon: string;
++  children: { name: string; icon: string }[];
++}
++
++export const DEFAULT_CATEGORIES: DefaultCategory[] = [
++  { name: "Housing & Utilities", type: "E", icon: "41847D.png", children: [
++    { name: "Rent / Mortgage", icon: "776469.png" },
++    { name: "Electricity / Water / Gas", icon: "5D663F.png" },
++    { name: "Internet & Cable", icon: "5F5C68.png" },
++  ] },
++  { name: "Food & Dining", type: "E", icon: "953939.png", children: [
++    { name: "Groceries", icon: "8B5E3C.png" },
++    { name: "Restaurants & Delivery", icon: "756A2D.png" },
++    { name: "Coffee & Alcohol", icon: "533482.png" },
++  ] },
++  { name: "Transportation", type: "E", icon: "863D86.png", children: [
++    { name: "Public Transit", icon: "596B79.png" },
++    { name: "Ride-Hailing & Fuel", icon: "75673F.png" },
++    { name: "Vehicle & Parking", icon: "7B7838.png" },
++  ] },
++  { name: "Health & Wellness", type: "E", icon: "B93E3E.png", children: [
++    { name: "Doctor & Pharmacy", icon: "B58803.png" },
++    { name: "Gym & Fitness", icon: "73424E.png" },
++    { name: "Grooming & Dental", icon: "774040.png" },
++  ] },
++  { name: "Entertainment", type: "E", icon: "Entertainment.png", children: [
++    { name: "Movies & Events", icon: "424984.png" },
++    { name: "Gaming & Hobbies", icon: "523E79.png" },
++  ] },
++  { name: "Shopping", type: "E", icon: "5576B3.png", children: [
++    { name: "Clothing & Fashion", icon: "7B5079.png" },
++    { name: "Electronics & Gadgets", icon: "5E6A68.png" },
++    { name: "Home & Decor", icon: "4E6228.png" },
++    { name: "Beauty & Skincare", icon: "326571.png" },
++  ] },
++  { name: "Finance & Insurance", type: "E", icon: "D3A234.png", children: [
++    { name: "Loan & EMI", icon: "B1A92E.png" },
++    { name: "Insurance & Taxes", icon: "315C7E.png" },
++  ] },
++  { name: "Social & Gifts", type: "E", icon: "7E781D.png", children: [
++    { name: "Gifts & Donations", icon: "7E496B.png" },
++    { name: "Parties & Dating", icon: "A01809.png" },
++  ] },
++  { name: "Investments & Returns", type: "I", icon: "D3A234.png", children: [
++    { name: "Stocks & Dividends", icon: "Stocks.png" },
++  ] },
++  { name: "Rental & Passive Income", type: "I", icon: "2B5F93.png", children: [] },
++  { name: "Employment Income", type: "I", icon: "3A6175.png", children: [
++    { name: "Salary", icon: "4E863A.png" },
++    { name: "Bonus & Overtime", icon: "316A5C.png" },
++  ] },
++];
++
++export interface SeedOptions {
++  // new id for categories and outbox ops (default: lowercase uuid v7)
++  newId?: () => string;
++  // outbox created_at "YYYY-MM-DD HH:MM:SS" (default: device clock)
++  now?: () => string;
++}
++
++// inserts one category row + its outbox INSERT; throws on outbox error so the transaction rolls back
++function insertCategory(
++  db: SqlDb,
++  userId: number,
++  id: string,
++  name: string,
++  type: string,
++  parentId: string | null,
++  icon: string,
++  options: SeedOptions,
++): void {
++  db.run(
++    `INSERT INTO category (id, user_id, name, type, parent_id, root_category_id, icon, auto_repeat_budget)
++     VALUES (?, ?, ?, ?, ?, NULL, ?, 0)`,
++    [id, userId, name, type, parentId, icon],
++  );
++  const op = addOutboxOp(
++    db,
++    {
++      userId: userId,
++      entity: "category",
++      recordId: id,
++      op: "INSERT",
++      data: { id: id, name: name, type: type, parent_id: parentId, icon: icon },
++    },
++    { newId: options.newId, now: options.now },
++  );
++  if (op.IsError) {
++    throw new Error(op.ErrorMessage);
++  }
++}
++
++/**
++ * Creates the 36 default categories for a user, in one transaction.
++ * Parents get their UUID first, so every child already knows its parent_id.
++ * A user who already has categories is skipped (no duplicates).
++ *
++ * @returns ResponseParams, Other.skipped = true when nothing was created
++ */
++export function seedDefaultCategories(db: SqlDb, userId: number, options: SeedOptions = {}): ResponseParams<null> {
++  const newId = options.newId ?? (() => uuidv7());
++  const withId: SeedOptions = { newId: newId, now: options.now };
++
++  try {
++    const existing = db.all<{ n: number }>(`SELECT COUNT(*) AS n FROM category WHERE user_id = ?`, [userId]);
++    if (existing.length > 0 && Number(existing[0].n) > 0) {
++      return response(null, false, "", 200, { skipped: true });
++    }
++  } catch (error) {
++    const message = error instanceof Error ? error.message : String(error);
++    return response(null, true, "default categories failed: " + message, 500);
++  }
++
++  db.exec("BEGIN IMMEDIATE");
++  try {
++    for (const parent of DEFAULT_CATEGORIES) {
++      const parentId = newId();
++      insertCategory(db, userId, parentId, parent.name, parent.type, null, parent.icon, withId);
++
++      for (const child of parent.children) {
++        insertCategory(db, userId, newId(), child.name, parent.type, parentId, child.icon, withId);
++      }
++    }
++    db.exec("COMMIT");
++    return response(null, false, "", 200);
++  } catch (error) {
++    db.exec("ROLLBACK");
++    const message = error instanceof Error ? error.message : String(error);
++    return response(null, true, "default categories failed: " + message, 500);
++  }
++}
+diff --git a/tests/sync/defaultCategories.test.ts b/tests/sync/defaultCategories.test.ts
+new file mode 100644
+index 0000000..6685047
+--- /dev/null
++++ b/tests/sync/defaultCategories.test.ts
+@@ -0,0 +1,122 @@
++import { describe, it, expect } from "vitest";
++import { createOldDb, wrap } from "../uuidMigration/oldDb";
++import { migrateToUuid } from "@/data/database/uuidMigration/migrateToUuid";
++import { DEFAULT_CATEGORIES, seedDefaultCategories } from "@/data/database/sync/defaultCategories";
++
++/**
++ * 2.2c — app-side default categories (P2-D3): UUIDs made in the app, parents first,
++ * one outbox INSERT per category. Uses the live server default list (11 + 25).
++ */
++
++const NOW = () => "2026-10-25 10:00:00";
++
++// empty phone already in the new (UUID) shape
++function newPhone() {
++  const raw = createOldDb();
++  const db = wrap(raw);
++  migrateToUuid(db, () => "unused", "2026-10-25 09:00:00");
++  return { raw, db };
++}
++
++function ids() {
++  let n = 0;
++  return () => "id-" + String(++n).padStart(3, "0");
++}
++
++describe("DEFAULT_CATEGORIES list", () => {
++  it("has 11 parents and 25 children (live server list)", () => {
++    expect(DEFAULT_CATEGORIES.length).toBe(11);
++    const children = DEFAULT_CATEGORIES.reduce((sum, p) => sum + p.children.length, 0);
++    expect(children).toBe(25);
++  });
++});
++
++describe("seedDefaultCategories", () => {
++  it("inserts 36 categories for the user", () => {
++    const { db, raw } = newPhone();
++    const result = seedDefaultCategories(db, 5, { newId: ids(), now: NOW });
++    expect(result.IsError).toBe(false);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM category WHERE user_id = 5").get() as any).n).toBe(36);
++  });
++
++  it("children point to their parent and take its type", () => {
++    const { db, raw } = newPhone();
++    seedDefaultCategories(db, 5, { newId: ids(), now: NOW });
++    const salary = raw.prepare("SELECT * FROM category WHERE name = 'Salary'").get() as any;
++    const parent = raw.prepare("SELECT * FROM category WHERE id = ?").get(salary.parent_id) as any;
++    expect(parent.name).toBe("Employment Income");
++    expect(salary.type).toBe("I");
++    expect(salary.icon).toBe("4E863A.png");
++    const groceries = raw.prepare("SELECT * FROM category WHERE name = 'Groceries'").get() as any;
++    const food = raw.prepare("SELECT * FROM category WHERE id = ?").get(groceries.parent_id) as any;
++    expect(food.name).toBe("Food & Dining");
++    expect(groceries.type).toBe("E");
++  });
++
++  it("parents have no parent, root is NULL, auto repeat 0, icons kept", () => {
++    const { db, raw } = newPhone();
++    seedDefaultCategories(db, 5, { newId: ids(), now: NOW });
++    const food = raw.prepare("SELECT * FROM category WHERE name = 'Food & Dining'").get() as any;
++    expect(food.parent_id).toBeNull();
++    expect(food.root_category_id).toBeNull();
++    expect(food.auto_repeat_budget).toBe(0);
++    expect(food.icon).toBe("953939.png");
++  });
++
++  it("one outbox INSERT per category, every parent before its children", () => {
++    const { db, raw } = newPhone();
++    seedDefaultCategories(db, 5, { newId: ids(), now: NOW });
++    const ops = raw.prepare("SELECT * FROM sync_outbox ORDER BY seq").all() as any[];
++    expect(ops.length).toBe(36);
++    expect(ops.every((o) => o.op === "INSERT" && o.entity === "category" && o.user_id === 5)).toBe(true);
++    const position = new Map(ops.map((o, i) => [o.record_id, i]));
++    for (const op of ops) {
++      const data = JSON.parse(op.data);
++      expect(Object.keys(data).sort()).toEqual(["icon", "id", "name", "parent_id", "type"]);
++      if (data.parent_id !== null) {
++        expect(position.get(data.parent_id)!).toBeLessThan(position.get(data.id)!);
++      }
++    }
++  });
++
++  it("default ids are lowercase uuid v7", () => {
++    const { db, raw } = newPhone();
++    seedDefaultCategories(db, 5);
++    const row = raw.prepare("SELECT id FROM category LIMIT 1").get() as any;
++    expect(row.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
++  });
++
++  it("second user gets their own 36 with different ids", () => {
++    const { db, raw } = newPhone();
++    seedDefaultCategories(db, 5);
++    seedDefaultCategories(db, 6);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM category WHERE user_id = 6").get() as any).n).toBe(36);
++    expect((raw.prepare("SELECT COUNT(DISTINCT id) AS n FROM category").get() as any).n).toBe(72);
++  });
++
++  it("user who already has categories: skipped, no duplicates", () => {
++    const { db, raw } = newPhone();
++    seedDefaultCategories(db, 5);
++    const result = seedDefaultCategories(db, 5);
++    expect(result.IsError).toBe(false);
++    expect(result.Other?.skipped).toBe(true);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM category WHERE user_id = 5").get() as any).n).toBe(36);
++  });
++
++  it("failure half-way rolls back: no categories, no outbox rows", () => {
++    const { db, raw } = newPhone();
++    let n = 0;
++    const brokenId = () => {
++      n++;
++      if (n > 10) {
++        throw new Error("boom");
++      }
++      return "id-" + n;
++    };
++    const result = seedDefaultCategories(db, 5, { newId: brokenId, now: NOW });
++    expect(result.IsError).toBe(true);
++    expect(result.ErrorMessage).toContain("boom");
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM category").get() as any).n).toBe(0);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM sync_outbox").get() as any).n).toBe(0);
++  });
++});
