@@ -1,0 +1,326 @@
+diff --git a/data/database/sqlDb.ts b/data/database/sqlDb.ts
+new file mode 100644
+index 0000000..5705016
+--- /dev/null
++++ b/data/database/sqlDb.ts
+@@ -0,0 +1,13 @@
++/**
++ * Minimal database interface for new sync-related code (migration, outbox, defaults).
++ * The app passes the expo-sqlite singleton through an adapter
++ * (uuidMigration/expoMigrationDb.ts); tests pass better-sqlite3.
++ */
++export interface SqlDb {
++  // run one or more SQL statements, no parameters, no result
++  exec(sql: string): void;
++  // run one statement with parameters (INSERT / UPDATE / DELETE)
++  run(sql: string, params?: unknown[]): void;
++  // run a SELECT and return all rows
++  all<T>(sql: string, params?: unknown[]): T[];
++}
+diff --git a/data/database/sync/outboxRepo.ts b/data/database/sync/outboxRepo.ts
+new file mode 100644
+index 0000000..6ba2c34
+--- /dev/null
++++ b/data/database/sync/outboxRepo.ts
+@@ -0,0 +1,122 @@
++import { ResponseParams } from "@/interfaces/interface";
++import { response } from "@/util/response";
++import { v7 as uuidv7 } from "uuid";
++import { SqlDb } from "../sqlDb";
++
++/**
++ * Local operation log (sync_outbox, decision P2-D1).
++ * Every add / edit / delete of a synced row writes one op here, in the SAME
++ * transaction as the real change (the caller opens the transaction).
++ *
++ * Collapse rules — only into an op that is not sent yet (sent = 0):
++ *   INSERT + UPDATE -> INSERT with new data
++ *   INSERT + DELETE -> both removed (server never had the row)
++ *   UPDATE + UPDATE -> UPDATE with new data
++ *   UPDATE + DELETE -> DELETE
++ * An op already sent (sent = 1, waiting for the server reply) is never changed:
++ * a new op is added instead.
++ */
++
++export type OutboxEntity = "category" | "budget" | "bill";
++export type OutboxOpType = "INSERT" | "UPDATE" | "DELETE";
++
++export interface NewOutboxOp {
++  userId: number;
++  entity: OutboxEntity;
++  recordId: string;
++  op: OutboxOpType;
++  // wire columns of the row (registry), null for DELETE
++  data: Record<string, unknown> | null;
++}
++
++export interface OutboxOptions {
++  // new op_id (default: lowercase uuid v7)
++  newId?: () => string;
++  // created_at "YYYY-MM-DD HH:MM:SS" (default: device clock)
++  now?: () => string;
++}
++
++const ENTITIES: string[] = ["category", "budget", "bill"];
++
++// device local time as "YYYY-MM-DD HH:MM:SS"
++function localNow(): string {
++  const d = new Date();
++  const pad = (value: number) => String(value).padStart(2, "0");
++  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
++}
++
++// input problems -> message, valid -> null
++function validate(input: NewOutboxOp): string | null {
++  if (!ENTITIES.includes(input.entity)) {
++    return "unknown entity: " + input.entity;
++  }
++  if (input.op === "DELETE" && input.data !== null) {
++    return "DELETE must not have data";
++  }
++  if (input.op !== "DELETE" && input.data === null) {
++    return input.op + " needs data";
++  }
++  return null;
++}
++
++function insertOp(db: SqlDb, input: NewOutboxOp, opId: string, createdAt: string): void {
++  const data = input.data === null ? null : JSON.stringify(input.data);
++  db.run(
++    `INSERT INTO sync_outbox (op_id, user_id, entity, record_id, op, data, sent, created_at)
++     VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
++    [opId, input.userId, input.entity, input.recordId, input.op, data, createdAt],
++  );
++}
++
++/**
++ * Adds one operation to the local log, applying the collapse rules.
++ * Call it inside the same transaction as the real table change.
++ *
++ * @returns ResponseParams, IsError true (400) for invalid input
++ */
++export function addOutboxOp(db: SqlDb, input: NewOutboxOp, options: OutboxOptions = {}): ResponseParams<null> {
++  const problem = validate(input);
++  if (problem !== null) {
++    return response(null, true, problem, 400);
++  }
++
++  try {
++    const newId = options.newId ?? (() => uuidv7());
++    const now = options.now ?? localNow;
++
++    // latest op of this record that the server has not seen yet
++    const pending = db.all<{ seq: number; op: OutboxOpType }>(
++      `SELECT seq, op FROM sync_outbox
++       WHERE entity = ? AND record_id = ? AND sent = 0
++       ORDER BY seq DESC LIMIT 1`,
++      [input.entity, input.recordId],
++    );
++
++    if (pending.length === 0) {
++      insertOp(db, input, newId(), now());
++      return response(null, false, "", 200);
++    }
++
++    const existing = pending[0];
++    const data = input.data === null ? null : JSON.stringify(input.data);
++
++    if (existing.op === "INSERT" && input.op === "UPDATE") {
++      // still a new row for the server, just with the latest data
++      db.run(`UPDATE sync_outbox SET data = ? WHERE seq = ?`, [data, existing.seq]);
++    } else if (existing.op === "INSERT" && input.op === "DELETE") {
++      // server never had it: nothing to send
++      db.run(`DELETE FROM sync_outbox WHERE seq = ?`, [existing.seq]);
++    } else if (existing.op === "UPDATE" && input.op === "UPDATE") {
++      db.run(`UPDATE sync_outbox SET data = ? WHERE seq = ?`, [data, existing.seq]);
++    } else if (existing.op === "UPDATE" && input.op === "DELETE") {
++      db.run(`UPDATE sync_outbox SET op = 'DELETE', data = NULL WHERE seq = ?`, [existing.seq]);
++    } else {
++      // no rule for this pair (e.g. after a DELETE): keep both, in order
++      insertOp(db, input, newId(), now());
++    }
++    return response(null, false, "", 200);
++  } catch (error) {
++    const message = error instanceof Error ? error.message : String(error);
++    return response(null, true, "outbox write failed: " + message, 500);
++  }
++}
+diff --git a/data/database/uuidMigration/migrationDb.ts b/data/database/uuidMigration/migrationDb.ts
+index 84278f3..5b971ce 100644
+--- a/data/database/uuidMigration/migrationDb.ts
++++ b/data/database/uuidMigration/migrationDb.ts
+@@ -1,13 +1,8 @@
++import { SqlDb } from "../sqlDb";
++
+ /**
+- * Minimal database interface used by the UUID migration.
+- * The app passes the expo-sqlite singleton through a small adapter; tests pass
+- * better-sqlite3. Keeping the migration on this interface lets it be tested in Node.
++ * Database interface used by the UUID migration.
++ * Same as the shared SqlDb (data/database/sqlDb.ts); kept as a name so the
++ * migration files stay unchanged.
+  */
+-export interface MigrationDb {
+-  // run one or more SQL statements, no parameters, no result
+-  exec(sql: string): void;
+-  // run one statement with parameters (INSERT / UPDATE / DELETE)
+-  run(sql: string, params?: unknown[]): void;
+-  // run a SELECT and return all rows
+-  all<T>(sql: string, params?: unknown[]): T[];
+-}
++export type MigrationDb = SqlDb;
+diff --git a/tests/sync/outboxRepo.test.ts b/tests/sync/outboxRepo.test.ts
+new file mode 100644
+index 0000000..402a539
+--- /dev/null
++++ b/tests/sync/outboxRepo.test.ts
+@@ -0,0 +1,149 @@
++import { describe, it, expect } from "vitest";
++import Database from "better-sqlite3";
++import { wrap } from "../uuidMigration/oldDb";
++import { NEW_TABLES_SQL } from "@/data/database/uuidMigration/newSchema";
++import { addOutboxOp } from "@/data/database/sync/outboxRepo";
++
++/**
++ * 2.2b — local operation log (P2-D1). One op per record while unsent (collapse rules).
++ * A sent op (sent = 1, waiting for the server) is never changed.
++ */
++
++const NOW = () => "2026-10-25 10:00:00";
++
++function setup() {
++  const raw = new Database(":memory:");
++  raw.exec(NEW_TABLES_SQL); // includes sync_outbox
++  let n = 0;
++  const newId = () => "op-" + ++n;
++  const db = wrap(raw);
++  const add = (op: "INSERT" | "UPDATE" | "DELETE", recordId: string, data: Record<string, unknown> | null) =>
++    addOutboxOp(db, { userId: 5, entity: "bill", recordId: recordId, op: op, data: data }, { newId: newId, now: NOW });
++  const rows = () => raw.prepare("SELECT * FROM sync_outbox ORDER BY seq").all() as any[];
++  return { raw, db, add, rows };
++}
++
++describe("addOutboxOp — new record", () => {
++  it("adds one row with op_id, user, entity, data as JSON, sent 0", () => {
++    const { add, rows } = setup();
++    const result = add("INSERT", "b1", { id: "b1", amount_paise: 4500 });
++    expect(result.IsError).toBe(false);
++    const all = rows();
++    expect(all.length).toBe(1);
++    expect(all[0]).toMatchObject({ op_id: "op-1", user_id: 5, entity: "bill", record_id: "b1", op: "INSERT", sent: 0, created_at: "2026-10-25 10:00:00" });
++    expect(JSON.parse(all[0].data)).toEqual({ id: "b1", amount_paise: 4500 });
++  });
++});
++
++describe("addOutboxOp — collapse into the unsent op", () => {
++  it("INSERT + UPDATE -> one INSERT with the new data", () => {
++    const { add, rows } = setup();
++    add("INSERT", "b1", { id: "b1", amount_paise: 4500 });
++    add("UPDATE", "b1", { id: "b1", amount_paise: 5000 });
++    const all = rows();
++    expect(all.length).toBe(1);
++    expect(all[0].op).toBe("INSERT");
++    expect(JSON.parse(all[0].data).amount_paise).toBe(5000);
++  });
++
++  it("INSERT + DELETE -> nothing left (server never had it)", () => {
++    const { add, rows } = setup();
++    add("INSERT", "b1", { id: "b1" });
++    add("DELETE", "b1", null);
++    expect(rows().length).toBe(0);
++  });
++
++  it("UPDATE + UPDATE -> one UPDATE with the latest data", () => {
++    const { add, rows } = setup();
++    add("UPDATE", "b1", { id: "b1", title: "Tea" });
++    add("UPDATE", "b1", { id: "b1", title: "Chai" });
++    const all = rows();
++    expect(all.length).toBe(1);
++    expect(all[0].op).toBe("UPDATE");
++    expect(JSON.parse(all[0].data).title).toBe("Chai");
++  });
++
++  it("UPDATE + DELETE -> one DELETE without data", () => {
++    const { add, rows } = setup();
++    add("UPDATE", "b1", { id: "b1", title: "Tea" });
++    add("DELETE", "b1", null);
++    const all = rows();
++    expect(all.length).toBe(1);
++    expect(all[0].op).toBe("DELETE");
++    expect(all[0].data).toBeNull();
++  });
++
++  it("collapsing keeps the first op's place in the queue and its op_id", () => {
++    const { add, rows } = setup();
++    add("INSERT", "b1", { id: "b1" });
++    add("INSERT", "b2", { id: "b2" });
++    add("UPDATE", "b1", { id: "b1", title: "x" });
++    const all = rows();
++    expect(all.map((r) => r.record_id)).toEqual(["b1", "b2"]);
++    expect(all[0].op_id).toBe("op-1");
++  });
++});
++
++describe("addOutboxOp — sent op is never changed", () => {
++  it("op in flight (sent = 1) + UPDATE -> new row, sent row untouched", () => {
++    const { raw, add, rows } = setup();
++    add("INSERT", "b1", { id: "b1", amount_paise: 4500 });
++    raw.exec("UPDATE sync_outbox SET sent = 1");
++    add("UPDATE", "b1", { id: "b1", amount_paise: 6000 });
++    const all = rows();
++    expect(all.length).toBe(2);
++    expect(all[0].sent).toBe(1);
++    expect(JSON.parse(all[0].data).amount_paise).toBe(4500);
++    expect(all[1]).toMatchObject({ op: "UPDATE", sent: 0 });
++  });
++
++  it("op in flight + DELETE -> new DELETE row", () => {
++    const { raw, add, rows } = setup();
++    add("INSERT", "b1", { id: "b1" });
++    raw.exec("UPDATE sync_outbox SET sent = 1");
++    add("DELETE", "b1", null);
++    expect(rows().map((r) => r.op)).toEqual(["INSERT", "DELETE"]);
++  });
++});
++
++describe("addOutboxOp — other records and invalid input", () => {
++  it("ops of different records don't affect each other", () => {
++    const { add, rows } = setup();
++    add("INSERT", "b1", { id: "b1" });
++    add("DELETE", "b2", null);
++    expect(rows().length).toBe(2);
++  });
++
++  it("same record id in another entity is a different record", () => {
++    const { db, rows } = setup();
++    addOutboxOp(db, { userId: 5, entity: "bill", recordId: "x", op: "INSERT", data: { id: "x" } }, { newId: () => "o1", now: NOW });
++    addOutboxOp(db, { userId: 5, entity: "budget", recordId: "x", op: "DELETE", data: null }, { newId: () => "o2", now: NOW });
++    expect(rows().length).toBe(2);
++  });
++
++  it("INSERT / UPDATE without data -> error, nothing written", () => {
++    const { add, rows } = setup();
++    const result = add("INSERT", "b1", null);
++    expect(result.IsError).toBe(true);
++    expect(result.StatusCode).toBe(400);
++    expect(rows().length).toBe(0);
++  });
++
++  it("DELETE with data -> error, nothing written", () => {
++    const { add, rows } = setup();
++    expect(add("DELETE", "b1", { id: "b1" }).IsError).toBe(true);
++    expect(rows().length).toBe(0);
++  });
++
++  it("unknown entity -> error", () => {
++    const { db } = setup();
++    const result = addOutboxOp(db, { userId: 5, entity: "users" as never, recordId: "x", op: "INSERT", data: { id: "x" } });
++    expect(result.IsError).toBe(true);
++  });
++
++  it("default op_id is a lowercase uuid v7", () => {
++    const { db, rows } = setup();
++    addOutboxOp(db, { userId: 5, entity: "bill", recordId: "x", op: "INSERT", data: { id: "x" } });
++    expect(rows()[0].op_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
++  });
++});

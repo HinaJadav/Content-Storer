@@ -1,6 +1,6 @@
 # CoinNote cloud sync — working memory
 
-**Last updated:** 2026-10-25 (2.2a) · read this first at every session start.
+**Last updated:** 2026-10-25 (2.2b) · read this first at every session start.
 Repos: app `navneetthakor/CNGUI` (cngui, branch `cloud_sync_hj_17102026`), server `HinaJadav/cnnode` (branch `cloud_sync_17102026`), device schema ref `navneetthakor/CNDBUtility`.
 Detail docs: `docs/` next to this file. All delivered patches: `patches/`.
 
@@ -51,7 +51,8 @@ Detail docs: `docs/` next to this file. All delivered patches: `patches/`.
 - Open for wiring step: what the new app does if the migration fails (blocking screen vs retry each launch); restore must be followed by an app restart; where the hidden restore button lives (2.7).
 - ✅ 2.2a: `util/money.ts` — `toPaise` (number/text → paise, null if invalid), `fromPaise` (paise → rupees; screens keep their own symbol + toLocaleString). Patch `phase-2.2a-money.patch`.
 - Decided for 2.2b/2.2c: shared `data/database/sqlDb.ts` `SqlDb` interface (`MigrationDb` becomes an alias); default categories = live server defaultQuery list (11 parents + 25 children, root 0 → NULL, icons unchanged).
-- ⏳ **NEXT:** 2.2b (outbox repo + collapse) → 2.2c (app-side defaults) → 2.3 … 2.7 → Phase 3 code → Phase 4 code → Phase 6 cleanup.
+- ✅ 2.2b: `data/database/sqlDb.ts` (`SqlDb`; `MigrationDb` = alias), `data/database/sync/outboxRepo.ts` `addOutboxOp(db, op)` with collapse rules (caller opens the transaction), returns ResponseParams. Patch `phase-2.2b-outbox.patch`.
+- ⏳ **NEXT:** 2.2c (app-side defaults) → 2.3 … 2.7 → Phase 3 code → Phase 4 code → Phase 6 cleanup.
 - Phase 4 open questions Q1–Q4 (`docs/CoinNote_Phase4_Detail.md`). Premium OP-1 (token refresh copies old ispremiumuser) — later.
 - Before first Phase 2 phone test: `eas build:version:set` → 35. Don't release a build with version code ≥ 35 before 2.2/2.3 (app-side defaults).
 
