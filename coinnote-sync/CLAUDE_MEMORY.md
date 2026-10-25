@@ -1,6 +1,6 @@
 # CoinNote cloud sync — working memory
 
-**Last updated:** 2026-10-25 (2.2c) · read this first at every session start.
+**Last updated:** 2026-10-25 (2.3a) · read this first at every session start.
 Repos: app `navneetthakor/CNGUI` (cngui, branch `cloud_sync_hj_17102026`), server `HinaJadav/cnnode` (branch `cloud_sync_17102026`), device schema ref `navneetthakor/CNDBUtility`.
 Detail docs: `docs/` next to this file. All delivered patches: `patches/`.
 
@@ -53,7 +53,9 @@ Detail docs: `docs/` next to this file. All delivered patches: `patches/`.
 - Decided for 2.2b/2.2c: shared `data/database/sqlDb.ts` `SqlDb` interface (`MigrationDb` becomes an alias); default categories = live server defaultQuery list (11 parents + 25 children, root 0 → NULL, icons unchanged).
 - ✅ 2.2b: `data/database/sqlDb.ts` (`SqlDb`; `MigrationDb` = alias), `data/database/sync/outboxRepo.ts` `addOutboxOp(db, op)` with collapse rules (caller opens the transaction), returns ResponseParams. Patch `phase-2.2b-outbox.patch`.
 - ✅ 2.2c: `data/database/sync/defaultCategories.ts` — `DEFAULT_CATEGORIES` (live list) + `seedDefaultCategories(db, userId)` (own transaction, parents first, outbox INSERT each, skips a user who already has categories). Patch `phase-2.2c-defaults.patch`. 2.2 complete.
-- ⏳ **NEXT:** 2.3 (repositories: UUID inserts, outbox writes in same transaction, new column names, category cascade delete, R14 buildIdList) … 2.7 → Phase 3 code → Phase 4 code → Phase 6 cleanup.
+- 2.3 approach (approved): **new repositories in `data/database/syncRepo/`** (same function names + ResponseParams as old `dbRepository/*`), old repos untouched until switch-on; they use `data/database/localDb.ts` (SqlDb adapter around the singleton db); tests mock localDb. Debug screen/debugRepo NOT ported (temporary, delete before release). 2.2c skip-guard kept.
+- ✅ 2.3a: `localDb.ts`, `syncRepo/transaction.ts` (inTransaction), `syncRepo/types.ts` (CategoryRow), `syncRepo/categoryRepo.ts` (reads, insertOrUpdate with outbox, countCategoryDependents, cascade DeleteCategory/deleteCategoryById). Patch `phase-2.3a-category-repo.patch`.
+- ⏳ **NEXT:** 2.3b billRepo → 2.3c budget/insights (repositories: UUID inserts, outbox writes in same transaction, new column names, category cascade delete, R14 buildIdList) … 2.7 → Phase 3 code → Phase 4 code → Phase 6 cleanup.
 - Phase 4 open questions Q1–Q4 (`docs/CoinNote_Phase4_Detail.md`). Premium OP-1 (token refresh copies old ispremiumuser) — later.
 - Before first Phase 2 phone test: `eas build:version:set` → 35. Don't release a build with version code ≥ 35 before 2.2/2.3 (app-side defaults).
 

@@ -1,0 +1,524 @@
+diff --git a/data/database/localDb.ts b/data/database/localDb.ts
+new file mode 100644
+index 0000000..4d83ee9
+--- /dev/null
++++ b/data/database/localDb.ts
+@@ -0,0 +1,10 @@
++import { db } from "./db.config";
++import { SqlDb } from "./sqlDb";
++import { expoMigrationDb } from "./uuidMigration/expoMigrationDb";
++
++/**
++ * The app's database as a SqlDb, for the new repositories (data/database/syncRepo).
++ * Wraps the same singleton `db` (db.config.ts), so the app still has ONE connection.
++ * Tests replace this module with an in-memory SQLite.
++ */
++export const localDb: SqlDb = expoMigrationDb(db);
+diff --git a/data/database/syncRepo/categoryRepo.ts b/data/database/syncRepo/categoryRepo.ts
+new file mode 100644
+index 0000000..811a28b
+--- /dev/null
++++ b/data/database/syncRepo/categoryRepo.ts
+@@ -0,0 +1,235 @@
++import { ResponseParams } from "@/interfaces/interface";
++import { response } from "@/util/response";
++import { v7 as uuidv7 } from "uuid";
++import { localDb } from "../localDb";
++import { addOutboxOp, OutboxEntity } from "../sync/outboxRepo";
++import { inTransaction, NotFoundError } from "./transaction";
++import { CategoryRow } from "./types";
++
++/**
++ * Category repository for the new (UUID) tables.
++ * Same function names as dbRepository/categoriesRepo.ts so screens switch by import path.
++ * Every write also writes its sync_outbox op in the same transaction.
++ * Delete = cascade (P2-D2): sub-categories, bills, budgets and attachments go too.
++ */
++
++// SELECT helper: rows or error, in ResponseParams format
++function select<T>(sql: string, params: unknown[] = []): ResponseParams<T[]> {
++  try {
++    return response(localDb.all<T>(sql, params), false, "", 200);
++  } catch (error) {
++    const message = error instanceof Error ? error.message : String(error);
++    return response([], true, message, 500);
++  }
++}
++
++// wire columns sent to the server (registry 1.1a)
++function wireData(row: CategoryRow): Record<string, unknown> {
++  return { id: row.id, name: row.name, type: row.type, parent_id: row.parent_id, icon: row.icon };
++}
++
++// adds one outbox op, throws on error so the transaction rolls back
++function outbox(
++  entity: OutboxEntity,
++  userId: number,
++  recordId: string,
++  op: "INSERT" | "UPDATE" | "DELETE",
++  data: Record<string, unknown> | null,
++): void {
++  const result = addOutboxOp(localDb, { userId: userId, entity: entity, recordId: recordId, op: op, data: data });
++  if (result.IsError) {
++    throw new Error(result.ErrorMessage);
++  }
++}
++
++/**
++ * get categories: top level of a type (parentId null) or children of a parent, filtered by name
++ */
++export async function getCategories(
++  type: RecordType,
++  search: string,
++  parentId: string | null,
++  userId: number,
++): Promise<ResponseParams<CategoryRow[]>> {
++  const whereParent = parentId === null ? "parent_id IS NULL AND type = ?" : "parent_id = ?";
++  const parentParam = parentId === null ? type : parentId;
++  return select<CategoryRow>(
++    `SELECT * FROM category
++     WHERE name LIKE ? AND user_id = ? AND ${whereParent}
++     ORDER BY name ASC`,
++    [`%${search}%`, userId, parentParam],
++  );
++}
++
++// number of direct child categories
++export async function getChildCategoriesCount(parentId: string): Promise<ResponseParams<{ count: number }[]>> {
++  return select(`SELECT COUNT(*) AS count FROM category WHERE parent_id = ?`, [parentId]);
++}
++
++// number of child categories that have a budget for the given month (budget card, past month)
++export async function getCategoryHaveChildWithBudgetSet(categoryId: string, month: number, year: number): Promise<ResponseParams<{ count: number }[]>> {
++  return select(
++    `SELECT COUNT(*) AS count FROM category c
++     WHERE EXISTS (SELECT 1 FROM budget b WHERE b.category_id = c.id AND b.month = ? AND b.year = ?)
++     AND c.parent_id = ?`,
++    [month, year, categoryId],
++  );
++}
++
++export async function getTitleById(categoryId: string, userId: number): Promise<ResponseParams<{ name: string }[]>> {
++  return select(`SELECT name FROM category WHERE id = ? AND user_id = ?`, [categoryId, userId]);
++}
++
++export async function getCatByName(name: string, userId: number): Promise<ResponseParams<CategoryRow[]>> {
++  return select(`SELECT * FROM category WHERE name = ? AND user_id = ? LIMIT 1`, [name, userId]);
++}
++
++export async function getCatById(categoryId: string, userId: number): Promise<ResponseParams<CategoryRow[]>> {
++  return select(`SELECT * FROM category WHERE id = ? AND user_id = ?`, [categoryId, userId]);
++}
++
++// the category and all its descendants
++export async function GetAllChildCatIds(catId: string): Promise<ResponseParams<{ ids: string }[]>> {
++  return select(
++    `WITH RECURSIVE category_tree AS (
++       SELECT c.id AS id FROM category c WHERE c.id = ?
++       UNION ALL
++       SELECT c.id AS id FROM category c INNER JOIN category_tree ct ON c.parent_id = ct.id
++     )
++     SELECT DISTINCT ct.id AS ids FROM category_tree ct`,
++    [catId],
++  );
++}
++
++/**
++ * insert (id empty) or update (id given) a category + its outbox op.
++ * @returns Data = id of the saved category
++ */
++export async function insertOrUpdateCategory(category: CategoryRow): Promise<ResponseParams<string | null>> {
++  return inTransaction(localDb, () => {
++    if (category.id) {
++      const found = localDb.all(`SELECT id FROM category WHERE id = ? AND user_id = ?`, [category.id, category.user_id]);
++      if (found.length === 0) {
++        throw new NotFoundError("category not found");
++      }
++      localDb.run(
++        `UPDATE category SET name = ?, type = ?, parent_id = ?, root_category_id = ?, icon = ?, auto_repeat_budget = ?
++         WHERE id = ? AND user_id = ?`,
++        [category.name, category.type, category.parent_id, category.root_category_id, category.icon, 0, category.id, category.user_id],
++      );
++      outbox("category", category.user_id, category.id, "UPDATE", wireData(category));
++      return category.id;
++    }
++
++    const saved: CategoryRow = { ...category, id: uuidv7(), auto_repeat_budget: 0 };
++    localDb.run(
++      `INSERT INTO category (id, user_id, name, type, parent_id, root_category_id, icon, auto_repeat_budget)
++       VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
++      [saved.id, saved.user_id, saved.name, saved.type, saved.parent_id, saved.root_category_id, saved.icon],
++    );
++    outbox("category", saved.user_id, saved.id, "INSERT", wireData(saved));
++    return saved.id;
++  }, "save category failed");
++}
++
++// category tree of one user, deepest first (children are deleted before parents)
++function categoryTreeDeepestFirst(categoryId: string, userId: number): string[] {
++  const rows = localDb.all<{ id: string; depth: number }>(
++    `WITH RECURSIVE tree AS (
++       SELECT id, 0 AS depth FROM category WHERE id = ? AND user_id = ?
++       UNION ALL
++       SELECT c.id, t.depth + 1 FROM category c INNER JOIN tree t ON c.parent_id = t.id WHERE c.user_id = ?
++     )
++     SELECT id, depth FROM tree ORDER BY depth DESC`,
++    [categoryId, userId, userId],
++  );
++  return rows.map((row) => row.id);
++}
++
++// "?, ?, ?" for an IN (...) list
++function placeholders(count: number): string {
++  return new Array(count).fill("?").join(", ");
++}
++
++/**
++ * What a cascade delete would remove (for the GitHub-style confirm alert).
++ * @returns Data = { childCategories, records, drafts, budgets }
++ */
++export async function countCategoryDependents(
++  categoryId: string,
++  userId: number,
++): Promise<ResponseParams<{ childCategories: number; records: number; drafts: number; budgets: number } | null>> {
++  try {
++    const tree = categoryTreeDeepestFirst(categoryId, userId);
++    if (tree.length === 0) {
++      return response(null, true, "category not found", 404);
++    }
++    const marks = placeholders(tree.length);
++    const bills = localDb.all<{ records: number; drafts: number }>(
++      `SELECT COUNT(*) AS records, COALESCE(SUM(CASE WHEN billstatus = 'D' THEN 1 ELSE 0 END), 0) AS drafts
++       FROM bill WHERE user_id = ? AND category_id IN (${marks})`,
++      [userId, ...tree],
++    )[0];
++    const budgets = localDb.all<{ n: number }>(
++      `SELECT COUNT(*) AS n FROM budget WHERE user_id = ? AND category_id IN (${marks})`,
++      [userId, ...tree],
++    )[0];
++    return response({
++      childCategories: tree.length - 1,
++      records: Number(bills.records),
++      drafts: Number(bills.drafts),
++      budgets: Number(budgets.n),
++    }, false, "", 200);
++  } catch (error) {
++    const message = error instanceof Error ? error.message : String(error);
++    return response(null, true, message, 500);
++  }
++}
++
++/**
++ * Cascade delete in one transaction (P2-D2):
++ * bills (+ their attachments) -> budgets -> sub-categories (deepest first) -> the category.
++ * One DELETE outbox op per row; unconfirmed ATT drafts write nothing (never synced).
++ */
++export function DeleteCategory(categoryId: string, userId: number): ResponseParams<null> {
++  const result = inTransaction(localDb, () => {
++    const tree = categoryTreeDeepestFirst(categoryId, userId);
++    if (tree.length === 0) {
++      throw new NotFoundError("category not found");
++    }
++    const marks = placeholders(tree.length);
++
++    const bills = localDb.all<{ id: string; billstatus: string }>(
++      `SELECT id, billstatus FROM bill WHERE user_id = ? AND category_id IN (${marks})`,
++      [userId, ...tree],
++    );
++    for (const bill of bills) {
++      localDb.run(`DELETE FROM bill_docurl WHERE bill_id = ?`, [bill.id]);
++      localDb.run(`DELETE FROM bill WHERE id = ? AND user_id = ?`, [bill.id, userId]);
++      if (bill.billstatus !== "D") {
++        outbox("bill", userId, bill.id, "DELETE", null);
++      }
++    }
++
++    const budgets = localDb.all<{ id: string }>(
++      `SELECT id FROM budget WHERE user_id = ? AND category_id IN (${marks})`,
++      [userId, ...tree],
++    );
++    for (const budget of budgets) {
++      localDb.run(`DELETE FROM budget WHERE id = ? AND user_id = ?`, [budget.id, userId]);
++      outbox("budget", userId, budget.id, "DELETE", null);
++    }
++
++    for (const id of tree) {
++      localDb.run(`DELETE FROM category WHERE id = ? AND user_id = ?`, [id, userId]);
++      outbox("category", userId, id, "DELETE", null);
++    }
++    return null;
++  }, "delete category failed");
++  return result as ResponseParams<null>;
++}
++
++// same cascade as DeleteCategory (old repo had both names)
++export async function deleteCategoryById(categoryId: string, userId: number): Promise<ResponseParams<null>> {
++  return DeleteCategory(categoryId, userId);
++}
+diff --git a/data/database/syncRepo/transaction.ts b/data/database/syncRepo/transaction.ts
+new file mode 100644
+index 0000000..6e95195
+--- /dev/null
++++ b/data/database/syncRepo/transaction.ts
+@@ -0,0 +1,26 @@
++import { ResponseParams } from "@/interfaces/interface";
++import { response } from "@/util/response";
++import { SqlDb } from "../sqlDb";
++
++/**
++ * Runs `work` inside one SQLite transaction: real table change + its sync_outbox op
++ * save together or not at all. Any thrown error rolls back.
++ *
++ * @returns ResponseParams with the value returned by `work` as Data
++ */
++export function inTransaction<T>(db: SqlDb, work: () => T, errorPrefix: string): ResponseParams<T | null> {
++  db.exec("BEGIN IMMEDIATE");
++  try {
++    const value = work();
++    db.exec("COMMIT");
++    return response(value, false, "", 200);
++  } catch (error) {
++    db.exec("ROLLBACK");
++    const message = error instanceof Error ? error.message : String(error);
++    const status = error instanceof NotFoundError ? 404 : 500;
++    return response(null, true, errorPrefix + ": " + message, status);
++  }
++}
++
++// thrown inside a transaction when the row does not exist for this user
++export class NotFoundError extends Error {}
+diff --git a/data/database/syncRepo/types.ts b/data/database/syncRepo/types.ts
+new file mode 100644
+index 0000000..0e50388
+--- /dev/null
++++ b/data/database/syncRepo/types.ts
+@@ -0,0 +1,13 @@
++/**
++ * Row shapes of the new (UUID) local tables (approved in 2.1b).
++ */
++export interface CategoryRow {
++  id: string;                      // uuid; "" when creating a new category
++  user_id: number;
++  name: string;
++  type: string;                    // 'I' / 'E'
++  parent_id: string | null;
++  root_category_id: string | null;
++  icon: string | null;
++  auto_repeat_budget: number;      // 0 / 1
++}
+diff --git a/tests/syncRepo/categoryRepo.test.ts b/tests/syncRepo/categoryRepo.test.ts
+new file mode 100644
+index 0000000..393b5c2
+--- /dev/null
++++ b/tests/syncRepo/categoryRepo.test.ts
+@@ -0,0 +1,174 @@
++import { describe, it, expect, vi, beforeEach } from "vitest";
++import { useFreshDb, testLocalDb } from "./testDb";
++
++vi.mock("@/data/database/localDb", () => ({ localDb: testLocalDb }));
++
++const repo = await import("@/data/database/syncRepo/categoryRepo");
++
++/**
++ * 2.3a — category repository on the new (UUID) tables.
++ * Same function names as dbRepository/categoriesRepo.ts; every write also writes
++ * its sync_outbox op in the same transaction. Delete = cascade (P2-D2).
++ */
++
++let raw: ReturnType<typeof useFreshDb>;
++const U = 5;
++
++beforeEach(() => {
++  raw = useFreshDb();
++});
++
++function outbox() {
++  return raw.prepare("SELECT entity, record_id, op, data FROM sync_outbox ORDER BY seq").all() as any[];
++}
++
++async function addCat(name: string, type: "I" | "E", parentId: string | null = null, userId = U) {
++  const result = await repo.insertOrUpdateCategory({ id: "", user_id: userId, name: name, type: type, parent_id: parentId, root_category_id: parentId, icon: "x.png", auto_repeat_budget: 0 });
++  return result.Data as string;
++}
++
++function addBill(id: string, categoryId: string | null, amountPaise: number, status = "C") {
++  raw.prepare(`INSERT INTO bill (id, user_id, category_id, from_acc_id, amount_paise, type, date, title, billstatus) VALUES (?, ?, ?, 0, ?, 'E', '2026-10-01 10:00:00', 't', ?)`).run(id, U, categoryId, amountPaise, status);
++}
++
++function addBudget(id: string, categoryId: string) {
++  raw.prepare(`INSERT INTO budget (id, user_id, category_id, year, month, type, limit_paise, used_paise) VALUES (?, ?, ?, 2026, 10, 'M', 1000, 0)`).run(id, U, categoryId);
++}
++
++describe("insertOrUpdateCategory", () => {
++  it("insert: new uuid v7, row saved, outbox INSERT with wire columns", async () => {
++    const result = await repo.insertOrUpdateCategory({ id: "", user_id: U, name: "Food", type: "E", parent_id: null, root_category_id: null, icon: "f.png", auto_repeat_budget: 0 });
++    expect(result.IsError).toBe(false);
++    const id = result.Data as string;
++    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
++    const row = raw.prepare("SELECT * FROM category WHERE id = ?").get(id) as any;
++    expect(row).toMatchObject({ user_id: U, name: "Food", type: "E", icon: "f.png" });
++    expect(outbox()).toEqual([{ entity: "category", record_id: id, op: "INSERT", data: JSON.stringify({ id: id, name: "Food", type: "E", parent_id: null, icon: "f.png" }) }]);
++  });
++
++  it("update: row changed, outbox collapses into the pending INSERT", async () => {
++    const id = await addCat("Food", "E");
++    const result = await repo.insertOrUpdateCategory({ id: id, user_id: U, name: "Food & Dining", type: "E", parent_id: null, root_category_id: null, icon: "g.png", auto_repeat_budget: 0 });
++    expect(result.IsError).toBe(false);
++    expect((raw.prepare("SELECT name FROM category WHERE id = ?").get(id) as any).name).toBe("Food & Dining");
++    const ops = outbox();
++    expect(ops.length).toBe(1);
++    expect(ops[0].op).toBe("INSERT");
++    expect(JSON.parse(ops[0].data).name).toBe("Food & Dining");
++  });
++
++  it("update of another user's category changes nothing", async () => {
++    const id = await addCat("Food", "E");
++    const result = await repo.insertOrUpdateCategory({ id: id, user_id: 99, name: "Hacked", type: "E", parent_id: null, root_category_id: null, icon: "x", auto_repeat_budget: 0 });
++    expect(result.IsError).toBe(true);
++    expect((raw.prepare("SELECT name FROM category WHERE id = ?").get(id) as any).name).toBe("Food");
++  });
++});
++
++describe("reads", () => {
++  it("getCategories: top level by type, children by parent, search by name", async () => {
++    const food = await addCat("Food", "E");
++    await addCat("Salary", "I");
++    await addCat("Tea", "E", food);
++    await addCat("Groceries", "E", food);
++    const top = await repo.getCategories("E", "", null, U);
++    expect((top.Data as any[]).map((c) => c.name)).toEqual(["Food"]);
++    const children = await repo.getCategories("E", "", food, U);
++    expect((children.Data as any[]).map((c) => c.name)).toEqual(["Groceries", "Tea"]);
++    const search = await repo.getCategories("E", "Te", food, U);
++    expect((search.Data as any[]).map((c) => c.name)).toEqual(["Tea"]);
++  });
++
++  it("getCatById / getTitleById / getCatByName only for the owner", async () => {
++    const food = await addCat("Food", "E");
++    expect(((await repo.getCatById(food, U)).Data as any[])[0].name).toBe("Food");
++    expect(((await repo.getCatById(food, 99)).Data as any[]).length).toBe(0);
++    expect(((await repo.getTitleById(food, U)).Data as any[])[0].name).toBe("Food");
++    expect(((await repo.getCatByName("Food", U)).Data as any[])[0].id).toBe(food);
++  });
++
++  it("getChildCategoriesCount and GetAllChildCatIds (recursive)", async () => {
++    const food = await addCat("Food", "E");
++    const tea = await addCat("Tea", "E", food);
++    const greenTea = await addCat("Green tea", "E", tea);
++    expect(((await repo.getChildCategoriesCount(food)).Data as any[])[0].count).toBe(1);
++    const ids = ((await repo.GetAllChildCatIds(food)).Data as any[]).map((r) => r.ids).sort();
++    expect(ids).toEqual([food, tea, greenTea].sort());
++  });
++
++  it("getCategoryHaveChildWithBudgetSet", async () => {
++    const food = await addCat("Food", "E");
++    const tea = await addCat("Tea", "E", food);
++    addBudget("bu1", tea);
++    expect(((await repo.getCategoryHaveChildWithBudgetSet(food, 10, 2026)).Data as any[])[0].count).toBe(1);
++    expect(((await repo.getCategoryHaveChildWithBudgetSet(food, 11, 2026)).Data as any[])[0].count).toBe(0);
++  });
++});
++
++describe("countCategoryDependents (for the delete alert)", () => {
++  it("counts sub-categories, records, drafts and budgets of the whole tree", async () => {
++    const food = await addCat("Food", "E");
++    const tea = await addCat("Tea", "E", food);
++    await addCat("Green tea", "E", tea);
++    addBill("b1", food, 100);
++    addBill("b2", tea, 200);
++    addBill("b3", tea, 300, "D");
++    addBudget("bu1", food);
++    const result = await repo.countCategoryDependents(food, U);
++    expect(result.Data).toEqual({ childCategories: 2, records: 3, drafts: 1, budgets: 1 });
++  });
++});
++
++describe("cascade delete (DeleteCategory / deleteCategoryById)", () => {
++  it("deletes the category, its sub-categories, bills, budgets and attachments", async () => {
++    const food = await addCat("Food", "E");
++    const tea = await addCat("Tea", "E", food);
++    const other = await addCat("Other", "E");
++    addBill("b1", food, 100);
++    addBill("b2", tea, 200);
++    addBill("b9", other, 900);
++    addBudget("bu1", tea);
++    raw.prepare("INSERT INTO bill_docurl (bill_id, url) VALUES ('b2', 'file://r.jpg')").run();
++    const result = repo.DeleteCategory(food, U);
++    expect(result.IsError).toBe(false);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM category").get() as any).n).toBe(1);
++    expect((raw.prepare("SELECT id FROM bill").all() as any[]).map((b) => b.id)).toEqual(["b9"]);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM budget").get() as any).n).toBe(0);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM bill_docurl").get() as any).n).toBe(0);
++  });
++
++  it("outbox: DELETE per row in order bills -> budgets -> sub-categories -> category; drafts write nothing", async () => {
++    const food = await addCat("Food", "E");
++    const tea = await addCat("Tea", "E", food);
++    addBill("b1", food, 100);
++    addBill("b3", tea, 300, "D");
++    addBudget("bu1", tea);
++    raw.exec("DELETE FROM sync_outbox"); // pretend the inserts were already synced
++    repo.DeleteCategory(food, U);
++    const ops = outbox().map((o) => o.entity + ":" + o.op + ":" + o.record_id);
++    expect(ops).toEqual(["bill:DELETE:b1", "budget:DELETE:bu1", "category:DELETE:" + tea, "category:DELETE:" + food]);
++    expect(outbox().every((o) => o.data === null)).toBe(true);
++  });
++
++  it("not yet synced rows: INSERT + DELETE collapse to nothing", async () => {
++    const food = await addCat("Food", "E");
++    await addCat("Tea", "E", food);
++    repo.DeleteCategory(food, U);
++    expect(outbox().length).toBe(0);
++  });
++
++  it("deleteCategoryById does the same cascade", async () => {
++    const food = await addCat("Food", "E");
++    addBill("b1", food, 100);
++    const result = await repo.deleteCategoryById(food, U);
++    expect(result.IsError).toBe(false);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM bill").get() as any).n).toBe(0);
++  });
++
++  it("another user's category is not deleted", async () => {
++    const food = await addCat("Food", "E");
++    const result = repo.DeleteCategory(food, 99);
++    expect(result.IsError).toBe(true);
++    expect((raw.prepare("SELECT COUNT(*) AS n FROM category").get() as any).n).toBe(1);
++  });
++});
+diff --git a/tests/syncRepo/testDb.ts b/tests/syncRepo/testDb.ts
+new file mode 100644
+index 0000000..3d613ad
+--- /dev/null
++++ b/tests/syncRepo/testDb.ts
+@@ -0,0 +1,30 @@
++import { createOldDb, wrap } from "../uuidMigration/oldDb";
++import { migrateToUuid } from "@/data/database/uuidMigration/migrateToUuid";
++import { SqlDb } from "@/data/database/sqlDb";
++
++/**
++ * Test helper for the new repositories: a fresh in-memory phone DB already in the
++ * new (UUID) shape. Tests mock "@/data/database/localDb" with `testLocalDb`, which
++ * forwards to whatever DB `useFreshDb()` created last.
++ */
++
++let current: ReturnType<typeof createOldDb> | null = null;
++
++export function useFreshDb() {
++  const raw = createOldDb();
++  migrateToUuid(wrap(raw), () => "unused", "2026-10-25 09:00:00");
++  current = raw;
++  return raw;
++}
++
++export const testLocalDb: SqlDb = {
++  exec(sql: string) {
++    wrap(current!).exec(sql);
++  },
++  run(sql: string, params: unknown[] = []) {
++    wrap(current!).run(sql, params);
++  },
++  all<T>(sql: string, params: unknown[] = []): T[] {
++    return wrap(current!).all<T>(sql, params);
++  },
++};
