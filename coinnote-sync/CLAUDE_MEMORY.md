@@ -1,6 +1,6 @@
 # CoinNote cloud sync — working memory
 
-**Last updated:** 2026-10-25 (2.1e) · read this first at every session start.
+**Last updated:** 2026-10-25 (2.2a) · read this first at every session start.
 Repos: app `navneetthakor/CNGUI` (cngui, branch `cloud_sync_hj_17102026`), server `HinaJadav/cnnode` (branch `cloud_sync_17102026`), device schema ref `navneetthakor/CNDBUtility`.
 Detail docs: `docs/` next to this file. All delivered patches: `patches/`.
 
@@ -49,7 +49,9 @@ Detail docs: `docs/` next to this file. All delivered patches: `patches/`.
 - ✅ 2.1d: `verifyCopy.ts` (counts, money row-by-row, links, outbox), `swapTables.ts` (drop/rename, ATT indexes, user_version=1), `migrateToUuid.ts` (one transaction, rollback on any problem, returns ResponseParams). Patch `phase-2.1d-verify-swap.patch`.
 - ✅ 2.1e: `runUuidMigration.ts` (skip if user_version>=1 → safety copy → migrate; copy fails → no migration), `expoMigrationDb.ts` (adapter), `safetyCopy.ts` (make/restore via expo-sqlite `backupDatabaseSync`, file `coinnote_pre_uuid.db`). Patch `phase-2.1e-runner-safety.patch`. 2.1 complete (not wired in).
 - Open for wiring step: what the new app does if the migration fails (blocking screen vs retry each launch); restore must be followed by an app restart; where the hidden restore button lives (2.7).
-- ⏳ **NEXT:** 2.2 … 2.7 → Phase 3 code → Phase 4 code → Phase 6 cleanup.
+- ✅ 2.2a: `util/money.ts` — `toPaise` (number/text → paise, null if invalid), `fromPaise` (paise → rupees; screens keep their own symbol + toLocaleString). Patch `phase-2.2a-money.patch`.
+- Decided for 2.2b/2.2c: shared `data/database/sqlDb.ts` `SqlDb` interface (`MigrationDb` becomes an alias); default categories = live server defaultQuery list (11 parents + 25 children, root 0 → NULL, icons unchanged).
+- ⏳ **NEXT:** 2.2b (outbox repo + collapse) → 2.2c (app-side defaults) → 2.3 … 2.7 → Phase 3 code → Phase 4 code → Phase 6 cleanup.
 - Phase 4 open questions Q1–Q4 (`docs/CoinNote_Phase4_Detail.md`). Premium OP-1 (token refresh copies old ispremiumuser) — later.
 - Before first Phase 2 phone test: `eas build:version:set` → 35. Don't release a build with version code ≥ 35 before 2.2/2.3 (app-side defaults).
 

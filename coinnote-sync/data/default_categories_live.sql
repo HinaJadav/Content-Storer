@@ -1,0 +1,13 @@
+-- live server defaultQuery rows (shared by developer 2026-10-25), source for app-side defaults (2.2c)
+INSERT INTO category (name, userid, rootcategoryid, parentid, typeofcategory, icon, autorepeatbudget) VALUES ('Housing & Utilities', {userid}, 0, NULL, 'E', '41847D.png', 0), ('Food & Dining', {userid}, 0, NULL, 'E', '953939.png', 0), ('Transportation', {userid}, 0, NULL, 'E', '863D86.png', 0), ('Health & Wellness', {userid}, 0, NULL, 'E', 'B93E3E.png', 0), ('Entertainment', {userid}, 0, NULL, 'E', 'Entertainment.png', 0), ('Shopping', {userid}, 0, NULL, 'E', '5576B3.png', 0), ('Finance & Insurance', {userid}, 0, NULL, 'E', 'D3A234.png', 0), ('Social & Gifts', {userid}, 0, NULL, 'E', '7E781D.png', 0), ('Investments & Returns',{userid},0, NULL, 'I', 'D3A234.png', 0), ('Rental & Passive Income',{userid},0, NULL, 'I', '2B5F93.png', 0), ('Employment Income', {userid}, 0, NULL, 'I', '3A6175.png', 0);
+-- children: Housing & Utilities: Rent / Mortgage 776469, Electricity / Water / Gas 5D663F, Internet & Cable 5F5C68
+-- Food & Dining: Groceries 8B5E3C, Restaurants & Delivery 756A2D, Coffee & Alcohol 533482
+-- Transportation: Public Transit 596B79, Ride-Hailing & Fuel 75673F, Vehicle & Parking 7B7838
+-- Health & Wellness: Doctor & Pharmacy B58803, Gym & Fitness 73424E, Grooming & Dental 774040
+-- Entertainment: Movies & Events 424984, Gaming & Hobbies 523E79
+-- Shopping: Clothing & Fashion 7B5079, Electronics & Gadgets 5E6A68, Home & Decor 4E6228, Beauty & Skincare 326571
+-- Finance & Insurance: Loan & EMI B1A92E, Insurance & Taxes 315C7E
+-- Social & Gifts: Gifts & Donations 7E496B, Parties & Dating A01809
+-- Employment Income (I): Salary 4E863A, Bonus & Overtime 316A5C
+-- Investments & Returns (I): Stocks & Dividends Stocks.png
+-- (icons are <code>.png; all children take the parent's type; rootcategoryid 0, autorepeatbudget 0)

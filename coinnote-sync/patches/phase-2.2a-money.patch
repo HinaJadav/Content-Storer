@@ -1,0 +1,107 @@
+diff --git a/tests/money.test.ts b/tests/money.test.ts
+new file mode 100644
+index 0000000..612d209
+--- /dev/null
++++ b/tests/money.test.ts
+@@ -0,0 +1,50 @@
++import { describe, it, expect } from "vitest";
++import { toPaise, fromPaise } from "@/util/money";
++
++/**
++ * 2.2a — money helpers. DB stores whole paise (D4); screens show rupees.
++ */
++
++describe("toPaise", () => {
++  it("rupees to whole paise", () => {
++    expect(toPaise(450.5)).toBe(45050);
++    expect(toPaise(1000)).toBe(100000);
++    expect(toPaise(0)).toBe(0);
++  });
++
++  it("rounds floating point noise to the nearest paisa", () => {
++    expect(toPaise(0.29)).toBe(29);   // 0.29 * 100 = 28.999999...
++    expect(toPaise(1.15)).toBe(115);  // 1.15 * 100 = 114.999999...
++    expect(toPaise(19.99)).toBe(1999);
++  });
++
++  it("accepts text from input fields", () => {
++    expect(toPaise("450.50")).toBe(45050);
++    expect(toPaise(" 12 ")).toBe(1200);
++  });
++
++  it("empty or invalid input -> null", () => {
++    for (const bad of ["", "   ", "abc", "12abc", "1,234.50", null, undefined, Number.NaN, Number.POSITIVE_INFINITY]) {
++      expect(toPaise(bad as never)).toBeNull();
++    }
++  });
++});
++
++describe("fromPaise", () => {
++  it("paise to rupees", () => {
++    expect(fromPaise(45050)).toBe(450.5);
++    expect(fromPaise(100000)).toBe(1000);
++    expect(fromPaise(29)).toBe(0.29);
++  });
++
++  it("null / undefined -> 0", () => {
++    expect(fromPaise(null)).toBe(0);
++    expect(fromPaise(undefined)).toBe(0);
++  });
++
++  it("round trip keeps the value", () => {
++    for (const rupees of [0.29, 1.15, 19.99, 450.5, 123456.78]) {
++      expect(fromPaise(toPaise(rupees) as number)).toBe(rupees);
++    }
++  });
++});
+diff --git a/util/money.ts b/util/money.ts
+new file mode 100644
+index 0000000..a178713
+--- /dev/null
++++ b/util/money.ts
+@@ -0,0 +1,45 @@
++/**
++ * Money helpers.
++ * The database stores amounts in whole paise (decision D4): 45050 = ₹450.50.
++ * Screens keep their own symbol / locale formatting and only convert the value:
++ *   CurrencyEnum[currency] + fromPaise(row.amount_paise).toLocaleString(locale)
++ */
++
++/**
++ * Rupees (number or text from an input field) -> whole paise.
++ * Rounds to the nearest paisa, so floating point noise (0.29 * 100 = 28.999...) is fixed.
++ *
++ * @returns paise, or null when the input is empty or not a number
++ */
++export function toPaise(value: number | string | null | undefined): number | null {
++  if (value === null || value === undefined) {
++    return null;
++  }
++
++  let rupees: number;
++  if (typeof value === "string") {
++    const text = value.trim();
++    if (text === "") {
++      return null;
++    }
++    rupees = Number(text);
++  } else {
++    rupees = value;
++  }
++
++  if (!Number.isFinite(rupees)) {
++    return null;
++  }
++  return Math.round(rupees * 100);
++}
++
++/**
++ * Whole paise -> rupees, for display and charts.
++ * null / undefined -> 0.
++ */
++export function fromPaise(paise: number | null | undefined): number {
++  if (paise === null || paise === undefined) {
++    return 0;
++  }
++  return paise / 100;
++}
